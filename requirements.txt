@@ -3,5 +3,6 @@ uvicorn
 pydantic
 python-dotenv
 pymupdf
-rank-bm25
 pytest
+httpx
+google-genai
