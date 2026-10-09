@@ -1,7 +1,12 @@
 import { describeHttpError } from "./lib.js";
 
-// Set VITE_API_URL in frontend/.env to point at another backend.
-export const API_URL = import.meta.env?.VITE_API_URL || "http://localhost:8000";
+// Set VITE_API_URL to override the backend for a deployment.
+export const API_URL = (
+  import.meta.env?.VITE_API_URL ||
+  (import.meta.env?.PROD
+    ? "https://ai-document-review-1.onrender.com"
+    : "http://localhost:8000")
+).replace(/\/+$/, "");
 
 export async function analyzeDocument(documentText, sourceText) {
   let response;
