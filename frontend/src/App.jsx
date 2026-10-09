@@ -9,6 +9,11 @@ import {
   splitByReview,
 } from "./lib.js";
 import { FLAWED_SAMPLE_REPORT, GOOD_SAMPLE_REPORT } from "./sampleReports.js";
+import {
+  createSourceChangeDemo,
+  resetSourceChangeDemo,
+  UPDATED_REIMBURSEMENT_PASSAGE,
+} from "./sourceChangeDemo.js";
 import "./styles.css";
 
 function readTextFile(file, onLoad, onError) {
@@ -45,6 +50,83 @@ function SampleCard({ tone, title, description, detail, onClick }) {
         Explore report <span aria-hidden="true">→</span>
       </button>
     </article>
+  );
+}
+
+function SourceChangeRecheck({ report, simulated, onSimulate, onReset }) {
+  const previousScore = FLAWED_SAMPLE_REPORT.score;
+  const currentScore = report.score;
+  const currentVerification = report.verification_results.find((item) => item.claim_id === "C1");
+
+  return (
+    <section className={`source-change-demo ${simulated ? "is-simulated" : ""}`}
+             aria-labelledby="source-change-title">
+      <div className="source-change-header">
+        <div>
+          <span className="source-change-label">SIMULATED SOURCE CHANGE — OFFLINE DEMO ONLY</span>
+          <h2 id="source-change-title">Source Change Recheck</h2>
+          <p>This prepared sample scenario demonstrates why an earlier finding may need checking after a policy update. It is not a new live AI verification.</p>
+        </div>
+        {simulated && <span className="source-change-state">Simulation active</span>}
+      </div>
+      {!simulated ? (
+        <>
+          <div className="source-change-before">
+            <div className="source-change-fact">
+              <span>Original source cap</span>
+              <strong>₹25,000</strong>
+            </div>
+            <div className="source-change-fact">
+              <span>Previously detected finding</span>
+              <strong className="verdict-contradicted">CONTRADICTED</strong>
+            </div>
+            <p>The original finding was based on the older source version, which capped reimbursement at ₹25,000.</p>
+          </div>
+          <button type="button" className="primary-button" onClick={onSimulate}>
+            Simulate Policy Update
+          </button>
+        </>
+      ) : (
+        <>
+          <div className="source-change-facts">
+            <div className="source-change-fact">
+              <span>Previous source cap</span>
+              <strong>₹25,000</strong>
+            </div>
+            <div className="source-change-arrow" aria-hidden="true">→</div>
+            <div className="source-change-fact updated">
+              <span>Updated source cap</span>
+              <strong>₹50,000</strong>
+            </div>
+            <div className="source-change-fact">
+              <span>Previous verdict</span>
+              <strong className="verdict-contradicted">CONTRADICTED</strong>
+            </div>
+            <div className="source-change-arrow" aria-hidden="true">→</div>
+            <div className="source-change-fact updated">
+              <span>Demonstration result after recheck</span>
+              <strong className="verdict-supported">{currentVerification?.verdict || "Not available"}</strong>
+            </div>
+          </div>
+          <blockquote className="source-change-quote">{UPDATED_REIMBURSEMENT_PASSAGE}</blockquote>
+          <p className="source-change-explanation">The updated sample source now matches the document’s ₹50,000 claim. This prepared demonstration changes the sample result locally; it does not rerun verification.</p>
+          <div className="source-change-comparison" aria-label="Before and after sample assessment">
+            <div>
+              <span>Before · trust score</span>
+              <strong>{previousScore.trust_score}/100</strong>
+              <small>{previousScore.finding_count} findings</small>
+            </div>
+            <span className="source-change-arrow" aria-hidden="true">→</span>
+            <div>
+              <span>After · trust score</span>
+              <strong>{currentScore.trust_score}/100</strong>
+              <small>{currentScore.finding_count} findings</small>
+            </div>
+          </div>
+          <button type="button" className="secondary-button" onClick={onReset}>Reset Simulation</button>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -391,6 +473,8 @@ export default function App() {
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [resultMode, setResultMode] = useState(null);
+  const [sampleKind, setSampleKind] = useState(null);
+  const [sourceChangeSimulated, setSourceChangeSimulated] = useState(false);
   const [sampleNotice, setSampleNotice] = useState("");
   const [decisions, setDecisions] = useState({});
   const [selectedId, setSelectedId] = useState(null);
@@ -417,6 +501,8 @@ export default function App() {
     setLoading(true);
     setError("");
     setSampleNotice("");
+    setSampleKind(null);
+    setSourceChangeSimulated(false);
     try {
       const data = await analyzeDocument(documentText, sourceText);
       if (requestRevision !== inputRevisionRef.current) {
@@ -451,6 +537,8 @@ export default function App() {
     const next = assessmentAfterInputChange(Boolean(result || resultMode || loading));
     setResult(next.result);
     setResultMode(next.resultMode);
+    setSampleKind(null);
+    setSourceChangeSimulated(false);
     setDecisions(next.decisions);
     setSelectedId(next.selectedId);
     setShowDismissed(false);
@@ -469,12 +557,14 @@ export default function App() {
     setter(value);
   }
 
-  function loadSample(preset, report) {
+  function loadSample(preset, report, kind) {
     inputRevisionRef.current += 1;
     setDocumentText(preset.document);
     setSourceText(preset.source);
     setResult(report);
     setResultMode("sample");
+    setSampleKind(kind);
+    setSourceChangeSimulated(false);
     setSampleNotice("");
     setError("");
     setDecisions({});
@@ -482,6 +572,26 @@ export default function App() {
     setShowDismissed(false);
     setShowInputs(false);
     requestAnimationFrame(() => workspaceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
+
+  function simulatePolicyUpdate() {
+    const demo = createSourceChangeDemo();
+    setResult(demo.report);
+    setSourceText(demo.sourceText);
+    setDecisions({});
+    setSelectedId(demo.report.ranked_findings[0]?.finding_id || null);
+    setShowDismissed(false);
+    setSourceChangeSimulated(true);
+  }
+
+  function resetPolicyUpdate() {
+    const demo = resetSourceChangeDemo();
+    setResult(demo.report);
+    setSourceText(demo.sourceText);
+    setDecisions({});
+    setSelectedId(demo.report.ranked_findings[0]?.finding_id || null);
+    setShowDismissed(false);
+    setSourceChangeSimulated(false);
   }
 
   function decide(id, value) {
@@ -544,14 +654,14 @@ export default function App() {
                 title="Explore a good document"
                 description="See a document whose claims match the supplied policy evidence."
                 detail="A sample report · No live analysis"
-                onClick={() => loadSample(GOOD_PRESET, GOOD_SAMPLE_REPORT)}
+                onClick={() => loadSample(GOOD_PRESET, GOOD_SAMPLE_REPORT, "good")}
               />
               <SampleCard
                 tone="risky"
                 title="Explore a risky document"
                 description="Preview conflicting claims, an unsupported statement, a risky promise, and masked sensitive data."
                 detail="A sample report · No live analysis"
-                onClick={() => loadSample(FLAWED_PRESET, FLAWED_SAMPLE_REPORT)}
+                onClick={() => loadSample(FLAWED_PRESET, FLAWED_SAMPLE_REPORT, "flawed")}
               />
             </div>
           </section>
@@ -603,6 +713,14 @@ export default function App() {
               : "LIVE ANALYSIS · Result from the AI service"}
           </div>
           <Summary result={result} reviewedCount={reviewedCount} />
+          {resultMode === "sample" && sampleKind === "flawed" && (
+            <SourceChangeRecheck
+              report={result}
+              simulated={sourceChangeSimulated}
+              onSimulate={simulatePolicyUpdate}
+              onReset={resetPolicyUpdate}
+            />
+          )}
           <div className="workspace-heading">
             <div>
               <span className="eyebrow">Review workspace</span>

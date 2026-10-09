@@ -13,6 +13,13 @@ import {
 } from "./lib.js";
 import { DEMO_SOURCE, FLAWED_DOCUMENT, GOOD_DOCUMENT } from "./demo.js";
 import { FLAWED_SAMPLE_REPORT, GOOD_SAMPLE_REPORT } from "./sampleReports.js";
+import {
+  createSourceChangeDemo,
+  ORIGINAL_REIMBURSEMENT_PASSAGE,
+  resetSourceChangeDemo,
+  UPDATED_FLAWED_SOURCE,
+  UPDATED_REIMBURSEMENT_PASSAGE,
+} from "./sourceChangeDemo.js";
 
 const result = {
   sentences: [
@@ -115,7 +122,13 @@ test("offline presets match the committed synthetic documents and trusted source
   assert.equal(DEMO_SOURCE, sampleFile("../../data/sources/refund_policy.txt"));
 });
 
-function assertPipelineReport(report, { expectedScore, expectedCoverage, expectedStatus }) {
+function assertPipelineReport(report, {
+  expectedScore,
+  expectedCoverage,
+  expectedStatus,
+  sourceText = DEMO_SOURCE,
+  expectedFindingIds,
+}) {
   assert.deepEqual(Object.keys(report).sort(), [
     "claims", "evidence", "findings", "ranked_findings", "score", "sentences", "status",
     "verification_results",
@@ -137,7 +150,7 @@ function assertPipelineReport(report, { expectedScore, expectedCoverage, expecte
   const verifications = new Map(report.verification_results.map((item) => [item.claim_id, item]));
   const evidenceByClaim = new Map(report.evidence.map((item) => [item.claim_id, item.evidence_chunks]));
   const claims = new Map(report.claims.map((item) => [item.claim_id, item]));
-  const sourceParagraphs = DEMO_SOURCE.split(/\n\s*\n/)
+  const sourceParagraphs = sourceText.split(/\n\s*\n/)
     .map((paragraph) => paragraph.trim())
     .filter(Boolean);
   assert.equal(report.evidence.length, report.claims.length);
@@ -191,7 +204,7 @@ function assertPipelineReport(report, { expectedScore, expectedCoverage, expecte
   }
   assert.deepEqual(
     report.findings.map((item) => item.finding_id),
-    report.findings.map((_, index) => `F${index + 1}`),
+    expectedFindingIds || report.findings.map((_, index) => `F${index + 1}`),
   );
   assert.equal(report.score.trust_score, Math.max(0, 100 - penaltyTotal));
   assert.deepEqual(
@@ -234,4 +247,52 @@ test("flawed offline report uses exact source quotes, masked PAN and policy-cons
   assert.deepEqual(FLAWED_SAMPLE_REPORT.ranked_findings.map((item) => item.finding_id),
     ["F3", "F6", "F1", "F2", "F4", "F5"]);
   assert.equal(buildFindingViews(FLAWED_SAMPLE_REPORT).length, 6);
+});
+
+test("source-change demo updates only the prepared reimbursement evidence and verdict", () => {
+  const originalSnapshot = structuredClone(FLAWED_SAMPLE_REPORT);
+  const { report, sourceText } = createSourceChangeDemo();
+  const reimbursementVerification = report.verification_results.find((item) => item.claim_id === "C1");
+  const reimbursementEvidence = report.evidence.find((item) => item.claim_id === "C1");
+
+  assert.ok(DEMO_SOURCE.includes(ORIGINAL_REIMBURSEMENT_PASSAGE));
+  assert.ok(sourceText.includes(UPDATED_REIMBURSEMENT_PASSAGE));
+  assert.equal(sourceText, UPDATED_FLAWED_SOURCE);
+  assert.equal(reimbursementEvidence.evidence_chunks[0].chunk_id, "SRC1-P1-C3");
+  assert.equal(reimbursementEvidence.evidence_chunks[0].text, UPDATED_REIMBURSEMENT_PASSAGE);
+  assert.equal(reimbursementVerification.verdict, "SUPPORTED");
+  assert.equal(reimbursementVerification.evidence_quote, UPDATED_REIMBURSEMENT_PASSAGE);
+  assert.ok(reimbursementEvidence.evidence_chunks[0].text.includes(reimbursementVerification.evidence_quote));
+  assert.ok(!report.findings.some((item) => item.claim_id === "C1"));
+  assert.ok(!report.ranked_findings.some((item) => item.claim_id === "C1"));
+
+  assertPipelineReport(report, {
+    expectedScore: 30,
+    expectedCoverage: 100,
+    expectedStatus: "BLOCKED",
+    sourceText,
+    expectedFindingIds: ["F2", "F3", "F4", "F5", "F6"],
+  });
+  assert.deepEqual(report.ranked_findings.map((item) => item.finding_id),
+    ["F3", "F6", "F2", "F4", "F5"]);
+  assert.equal(report.score.finding_count, 5);
+  assert.equal(report.score.critical_count, 2);
+  assert.equal(report.score.high_count, 1);
+  assert.equal(report.score.medium_count, 1);
+  assert.equal(report.score.low_count, 1);
+  assert.equal(report.status, "BLOCKED");
+  assert.deepEqual(FLAWED_SAMPLE_REPORT, originalSnapshot);
+});
+
+test("reset source-change demo restores the original report and source", () => {
+  const simulation = createSourceChangeDemo();
+  const reset = resetSourceChangeDemo();
+
+  assert.notStrictEqual(simulation.report, FLAWED_SAMPLE_REPORT);
+  assert.strictEqual(reset.report, FLAWED_SAMPLE_REPORT);
+  assert.equal(reset.sourceText, DEMO_SOURCE);
+  assert.equal(FLAWED_SAMPLE_REPORT.score.trust_score, 18);
+  assert.equal(FLAWED_SAMPLE_REPORT.score.finding_count, 6);
+  assert.equal(FLAWED_SAMPLE_REPORT.verification_results.find((item) => item.claim_id === "C1").verdict,
+    "CONTRADICTED");
 });
