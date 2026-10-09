@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { buildFindingViews, describeHttpError, priorityBreakdown, sentenceSeverity, splitByReview } from "./lib.js";
+import {
+  assessmentAfterInputChange,
+  buildFindingViews,
+  describeHttpError,
+  priorityBreakdown,
+  sentenceSeverity,
+  splitByReview,
+} from "./lib.js";
 import { DEMO_SOURCE, FLAWED_DOCUMENT, GOOD_DOCUMENT } from "./demo.js";
 import { FLAWED_SAMPLE_REPORT, GOOD_SAMPLE_REPORT } from "./sampleReports.js";
 
@@ -84,6 +91,19 @@ test("http errors become readable messages", () => {
   assert.match(describeHttpError(500, ""), /Server error \(500\)/);
 });
 
+test("input changes invalidate any current assessment and reviewer state", () => {
+  const afterSampleInputChange = assessmentAfterInputChange(true);
+  const afterLiveInputChange = assessmentAfterInputChange(true);
+  for (const state of [afterSampleInputChange, afterLiveInputChange]) {
+    assert.equal(state.result, null);
+    assert.equal(state.resultMode, null);
+    assert.deepEqual(state.decisions, {});
+    assert.equal(state.selectedId, null);
+    assert.match(state.notice, /report was cleared.*sample report or analyze again/i);
+  }
+  assert.equal(assessmentAfterInputChange(false).notice, "");
+});
+
 const sampleFile = (relativePath) => readFileSync(
   fileURLToPath(new URL(relativePath, import.meta.url)),
   "utf8",
@@ -105,27 +125,50 @@ function assertPipelineReport(report, { expectedScore, expectedCoverage, expecte
   assert.equal(report.score.evidence_coverage, expectedCoverage);
   assert.equal(report.status, expectedStatus);
   assert.equal(report.score.finding_count, report.findings.length);
+  const expectedStatusFromPolicy = report.findings.some((item) => item.consequence === "CRITICAL")
+    ? "BLOCKED"
+    : report.findings.length > 0
+      || report.verification_results.some((item) => ["UNSUPPORTED", "UNCLEAR"].includes(item.verdict))
+      ? "REVIEW"
+      : "READY";
+  assert.equal(report.status, expectedStatusFromPolicy);
 
   const sentences = new Map(report.sentences.map((item) => [item.sentence_id, item]));
   const verifications = new Map(report.verification_results.map((item) => [item.claim_id, item]));
   const evidenceByClaim = new Map(report.evidence.map((item) => [item.claim_id, item.evidence_chunks]));
   const claims = new Map(report.claims.map((item) => [item.claim_id, item]));
+  const sourceParagraphs = DEMO_SOURCE.split(/\n\s*\n/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
   assert.equal(report.evidence.length, report.claims.length);
   assert.equal(report.verification_results.length, report.claims.length);
 
+  let coveredClaims = 0;
   for (const claim of report.claims) {
     assert.match(claim.claim_id, /^C\d+$/);
     assert.match(claim.sentence_id, /^S\d+$/);
     assert.ok(sentences.has(claim.sentence_id));
     assert.ok(verifications.has(claim.claim_id));
-    const claimChunks = new Map((evidenceByClaim.get(claim.claim_id) || [])
-      .map((item) => [item.chunk_id, item]));
+    const claimEvidence = evidenceByClaim.get(claim.claim_id) || [];
+    if (claimEvidence.length) coveredClaims += 1;
+    const claimChunks = new Map();
+    for (const item of claimEvidence) {
+      assert.equal(item.source_id, "SRC1");
+      const chunkMatch = /^SRC1-P1-C(\d+)$/.exec(item.chunk_id);
+      assert.ok(chunkMatch, `invalid source/chunk ID: ${item.chunk_id}`);
+      assert.equal(item.text, sourceParagraphs[Number(chunkMatch[1]) - 1]);
+      assert.equal(item.score, 0, "sample retrieval scores are neutral, not presented as measured BM25 scores");
+      claimChunks.set(item.chunk_id, item);
+    }
     const result = verifications.get(claim.claim_id);
+    assert.equal(result.confidence, 0, "sample confidence is neutral, not presented as measured");
     for (const chunkId of result.evidence_chunk_ids) assert.ok(claimChunks.has(chunkId));
     if (result.evidence_quote) {
       assert.ok(result.evidence_chunk_ids.some((id) => claimChunks.get(id).text.includes(result.evidence_quote)));
     }
   }
+  assert.equal(report.score.evidence_coverage,
+    report.claims.length ? Math.round((coveredClaims / report.claims.length) * 1000) / 10 : 0);
 
   const expectedPriorities = { CRITICAL: 40, HIGH: 30, MEDIUM: 20, LOW: 10 };
   const verdictPoints = { CONTRADICTED: 30, UNSUPPORTED: 22, UNCLEAR: 12, SUPPORTED: 0 };
@@ -136,6 +179,9 @@ function assertPipelineReport(report, { expectedScore, expectedCoverage, expecte
   for (const finding of report.findings) {
     assert.match(finding.finding_id, /^F\d+$/);
     if (finding.claim_id) assert.ok(claims.has(finding.claim_id));
+    assert.ok([null, "SUPPORTED", "CONTRADICTED", "UNSUPPORTED", "UNCLEAR"].includes(finding.verdict));
+    assert.ok(["CRITICAL", "HIGH", "MEDIUM", "LOW"].includes(finding.consequence));
+    assert.ok([null, "SENSITIVE_DATA", "RISKY_COMMITMENT"].includes(finding.risk_type));
     const calculatedPriority = expectedPriorities[finding.consequence]
       + (verdictPoints[finding.verdict] || 0)
       + (riskPoints[finding.risk_type] || 0);
@@ -143,6 +189,10 @@ function assertPipelineReport(report, { expectedScore, expectedCoverage, expecte
     penaltyTotal += penalties[finding.consequence];
     counts[finding.consequence] += 1;
   }
+  assert.deepEqual(
+    report.findings.map((item) => item.finding_id),
+    report.findings.map((_, index) => `F${index + 1}`),
+  );
   assert.equal(report.score.trust_score, Math.max(0, 100 - penaltyTotal));
   assert.deepEqual(
     report.ranked_findings.map((item) => item.finding_id),

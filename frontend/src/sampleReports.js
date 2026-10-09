@@ -7,7 +7,7 @@ const chunk = (chunk_id, text, score = 0) => ({
   source_id: "SRC1", page: null, chunk_id, text, score,
 });
 const evidence = (claim_id, chunks = []) => ({ claim_id, evidence_chunks: chunks });
-const verification = (claim_id, verdict, explanation, evidence_chunk_ids = [], evidence_quote = "", confidence = 0.98) => ({
+const verification = (claim_id, verdict, explanation, evidence_chunk_ids = [], evidence_quote = "", confidence = 0) => ({
   claim_id, verdict, explanation, evidence_chunk_ids, evidence_quote, confidence,
 });
 const finding = (finding_id, claim_id, verdict, risk_type, consequence, priority_score, reason,
@@ -42,13 +42,13 @@ export const GOOD_SAMPLE_REPORT = {
     claim("C7", "S7", "Parking is available for visitors on the ground floor at a daily charge.", "policy"),
   ],
   evidence: [
-    evidence("C1", [chunk("SRC1-P1-C2", refundChunkText, 7.5078)]),
-    evidence("C2", [chunk("SRC1-P1-C2", refundChunkText, 6.1308)]),
-    evidence("C3", [chunk("SRC1-P1-C3", reimbursementChunkText, 5.7747)]),
-    evidence("C4", [chunk("SRC1-P1-C3", reimbursementChunkText, 7.7046)]),
-    evidence("C5", [chunk("SRC1-P1-C4", effectiveDateChunkText, 8.5895)]),
-    evidence("C6", [chunk("SRC1-P1-C5", availabilityChunkText, 7.6292)]),
-    evidence("C7", [chunk("SRC1-P1-C6", parkingChunkText, 10.7888)]),
+    evidence("C1", [chunk("SRC1-P1-C2", refundChunkText)]),
+    evidence("C2", [chunk("SRC1-P1-C2", refundChunkText)]),
+    evidence("C3", [chunk("SRC1-P1-C3", reimbursementChunkText)]),
+    evidence("C4", [chunk("SRC1-P1-C3", reimbursementChunkText)]),
+    evidence("C5", [chunk("SRC1-P1-C4", effectiveDateChunkText)]),
+    evidence("C6", [chunk("SRC1-P1-C5", availabilityChunkText)]),
+    evidence("C7", [chunk("SRC1-P1-C6", parkingChunkText)]),
   ],
   verification_results: [
     verification("C1", "SUPPORTED", "The source confirms the 30-day refund window.",
@@ -138,11 +138,11 @@ export const FLAWED_SAMPLE_REPORT = {
   sentences: flawedSentences,
   claims: flawedClaims,
   evidence: [
-    evidence("C1", [chunk("SRC1-P1-C3", reimbursementChunkText, 1.4437)]),
-    evidence("C2", [chunk("SRC1-P1-C4", effectiveDateChunkText, 6.7496)]),
-    evidence("C3", [chunk("SRC1-P1-C5", availabilityChunkText, 3.0517)]),
-    evidence("C4", [chunk("SRC1-P1-C6", parkingChunkText, 1.6179)]),
-    evidence("C5", [chunk("SRC1-P1-C2", refundChunkText, 1.3699)]),
+    evidence("C1", [chunk("SRC1-P1-C3", reimbursementChunkText)]),
+    evidence("C2", [chunk("SRC1-P1-C4", effectiveDateChunkText)]),
+    evidence("C3", [chunk("SRC1-P1-C5", availabilityChunkText)]),
+    evidence("C4", [chunk("SRC1-P1-C6", parkingChunkText)]),
+    evidence("C5", [chunk("SRC1-P1-C2", refundChunkText)]),
   ],
   verification_results: [
     verification("C1", "CONTRADICTED", "The document gives a different cap from the source.",
@@ -154,7 +154,7 @@ export const FLAWED_SAMPLE_REPORT = {
     verification("C4", "CONTRADICTED", "The source says visitor parking has a daily charge.",
       ["SRC1-P1-C6"], "Parking is available for visitors on the ground floor at a daily charge."),
     verification("C5", "UNSUPPORTED", "The retrieved source passage does not mention roadside assistance and does not substantiate this claim.",
-      [], "", 0.9),
+      [], ""),
   ],
   findings: flawedFindings,
   ranked_findings: [

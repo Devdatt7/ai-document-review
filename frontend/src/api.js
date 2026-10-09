@@ -12,7 +12,7 @@ export async function analyzeDocument(documentText, sourceText) {
       body: JSON.stringify({ document_text: documentText, source_text: sourceText }),
     });
   } catch {
-    throw new Error(`Cannot reach the backend at ${API_URL}. Is it running?`);
+    throw new Error("Cannot reach the review service. Check that the backend is running and try again.");
   }
 
   if (!response.ok) {

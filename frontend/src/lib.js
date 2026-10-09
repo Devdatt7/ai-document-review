@@ -2,6 +2,18 @@
 // No scoring, status or verdict logic lives here: the backend is the source of truth.
 
 export const CONSEQUENCE_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
+export const INPUT_CHANGE_NOTICE =
+  "The report was cleared because an input changed. Load a sample report or analyze again.";
+
+export function assessmentAfterInputChange(hasAssessment) {
+  return {
+    result: null,
+    resultMode: null,
+    decisions: {},
+    selectedId: null,
+    notice: hasAssessment ? INPUT_CHANGE_NOTICE : "",
+  };
+}
 
 const CONSEQUENCE_POINTS = { LOW: 10, MEDIUM: 20, HIGH: 30, CRITICAL: 40 };
 const VERDICT_POINTS = { CONTRADICTED: 30, UNSUPPORTED: 22, UNCLEAR: 12, SUPPORTED: 0 };

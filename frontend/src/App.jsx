@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { analyzeDocument } from "./api.js";
 import { FLAWED_PRESET, GOOD_PRESET } from "./demo.js";
-import { buildFindingViews, priorityBreakdown, sentenceSeverity, splitByReview } from "./lib.js";
+import {
+  assessmentAfterInputChange,
+  buildFindingViews,
+  priorityBreakdown,
+  sentenceSeverity,
+  splitByReview,
+} from "./lib.js";
 import { FLAWED_SAMPLE_REPORT, GOOD_SAMPLE_REPORT } from "./sampleReports.js";
 import "./styles.css";
 
-function readTextFile(file, setter) {
+function readTextFile(file, onLoad, onError) {
   const reader = new FileReader();
-  reader.onload = () => setter(String(reader.result || ""));
+  reader.onload = () => onLoad(String(reader.result || ""));
+  reader.onerror = onError;
   reader.readAsText(file);
 }
 
@@ -23,7 +30,36 @@ function BrandMark() {
   );
 }
 
-function InputPanel({ title, hint, value, onChange, number }) {
+function SampleCard({ tone, title, description, detail, onClick }) {
+  return (
+    <article className={`sample-card ${tone}`}>
+      <span className="sample-card-icon" aria-hidden="true">
+        {tone === "good" ? "✓" : "!"}
+      </span>
+      <div className="sample-card-copy">
+        <h3>{title}</h3>
+        <p>{description}</p>
+        <span className="sample-card-detail">{detail}</span>
+      </div>
+      <button type="button" className="sample-card-action" onClick={onClick}>
+        Explore report <span aria-hidden="true">→</span>
+      </button>
+    </article>
+  );
+}
+
+function InputPanel({
+  title,
+  hint,
+  value,
+  onChange,
+  onFileRead,
+  onFileReadStart,
+  isFileReadCurrent,
+  onFileReadError,
+  number,
+}) {
+  const fileReadId = useRef(0);
   return (
     <section className="input-panel">
       <div className="input-title">
@@ -37,12 +73,30 @@ function InputPanel({ title, hint, value, onChange, number }) {
           <input className="visually-hidden" type="file" accept=".txt,.md,text/plain"
                  aria-label={`Upload ${title} text file`}
                  onChange={(e) => {
-                   if (e.target.files[0]) readTextFile(e.target.files[0], onChange);
+                   const file = e.target.files[0];
+                   if (file) {
+                     const fileReadIdForRequest = ++fileReadId.current;
+                     const inputRevision = onFileReadStart();
+                     const isCurrent = () => fileReadIdForRequest === fileReadId.current
+                       && isFileReadCurrent(inputRevision);
+                     readTextFile(
+                       file,
+                       (text) => {
+                         if (isCurrent()) onFileRead(text);
+                       },
+                       () => {
+                         if (isCurrent()) onFileReadError();
+                       },
+                     );
+                   }
                    e.target.value = "";
                  }} />
         </label>
       </div>
-      <textarea aria-label={title} value={value} onChange={(e) => onChange(e.target.value)}
+      <textarea aria-label={title} value={value} onChange={(e) => {
+        fileReadId.current += 1;
+        onChange(e.target.value);
+      }}
                 placeholder={hint} rows={9} />
       <span className="input-footnote">Plain text · Markdown · Up to the app’s text limit</span>
     </section>
@@ -107,7 +161,10 @@ function FindingQueueItem({ view, rank, decision, selected, onSelect }) {
         </span>
         <span className="queue-excerpt">{affectedText || "Finding text is unavailable."}</span>
         <span className="queue-foot">
-          <span>Priority <strong>{Math.round(finding.priority_score)}</strong></span>
+          <span className="priority-badge">
+            <span>Priority</span>
+            <strong>{Math.round(finding.priority_score)}</strong>
+          </span>
           {decision === "accepted" && <span className="decision-state">Confirmed — Open</span>}
           {decision === "dismissed" && <span className="decision-state">Not an issue</span>}
         </span>
@@ -221,8 +278,8 @@ function FindingDetails({ view, rank, decision, onDecide }) {
     <article className="detail-panel" aria-label="Selected finding details">
       <div className="detail-header">
         <div>
-          <span className="eyebrow">Finding {String(rank).padStart(2, "0")} · Priority {Math.round(finding.priority_score)}</span>
-          <h2>Review this finding</h2>
+          <span className="eyebrow">{rank === 1 ? "Highest priority" : `Finding ${String(rank).padStart(2, "0")}`} · Priority {Math.round(finding.priority_score)}</span>
+          <h2>{rank === 1 ? "Start your review here" : "Review this finding"}</h2>
         </div>
         {decision === "accepted" && <span className="review-chip confirmed">Confirmed — Open</span>}
         {isDismissed && <span className="review-chip dismissed">Not an issue</span>}
@@ -268,12 +325,12 @@ function FindingDetails({ view, rank, decision, onDecide }) {
 
       <EvidenceSection view={view} />
 
-      <section className="detail-section action-section">
-        <h3>Recommended next step</h3>
-        <p className="action-copy">{finding.recommended_action || "Review the source and decide what should happen next."}</p>
+      <section className="recommended-callout" aria-label="Recommended next step">
+        <span className="label">Recommended next step</span>
+        <p>{finding.recommended_action || "Review the source and decide what should happen next."}</p>
       </section>
 
-      <div className="review-actions" aria-label="Reviewer actions">
+      <div className="review-actions" aria-label="Local reviewer actions">
         {isDismissed ? (
           <button type="button" className="secondary-button" onClick={() => onDecide(undefined)}>Restore to queue</button>
         ) : (
@@ -285,7 +342,7 @@ function FindingDetails({ view, rank, decision, onDecide }) {
             <button type="button" className="secondary-button" onClick={() => onDecide("dismissed")}>Not an issue</button>
           </>
         )}
-        <span className="action-disclaimer">Your decision does not change the system score or fix the document.</span>
+        <span className="action-disclaimer">Local review state only. This does not change the system assessment or edit the document.</span>
       </div>
     </article>
   );
@@ -341,6 +398,7 @@ export default function App() {
   const [showInputs, setShowInputs] = useState(true);
   const workspaceRef = useRef(null);
   const sentenceRefs = useRef({});
+  const inputRevisionRef = useRef(0);
 
   const views = useMemo(() => (result ? buildFindingViews(result) : []), [result]);
   const { open, dismissed } = useMemo(() => splitByReview(views, decisions), [views, decisions]);
@@ -355,11 +413,20 @@ export default function App() {
   }, [selectedId]);
 
   async function run() {
+    const requestRevision = inputRevisionRef.current;
     setLoading(true);
     setError("");
     setSampleNotice("");
     try {
       const data = await analyzeDocument(documentText, sourceText);
+      if (requestRevision !== inputRevisionRef.current) {
+        setResult(null);
+        setResultMode(null);
+        setDecisions({});
+        setSelectedId(null);
+        setSampleNotice("Inputs changed while analysis was running. Its report was discarded; analyze again.");
+        return;
+      }
       setResult(data);
       setResultMode("live");
       setDecisions({});
@@ -368,7 +435,10 @@ export default function App() {
       setShowInputs(false);
       requestAnimationFrame(() => workspaceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
     } catch (e) {
+      if (requestRevision !== inputRevisionRef.current) return;
       setResult(null);
+      setDecisions({});
+      setSelectedId(null);
       setResultMode(null);
       setError(e.message);
     } finally {
@@ -376,18 +446,31 @@ export default function App() {
     }
   }
 
+  function invalidateForInputChange() {
+    inputRevisionRef.current += 1;
+    const next = assessmentAfterInputChange(Boolean(result || resultMode || loading));
+    setResult(next.result);
+    setResultMode(next.resultMode);
+    setDecisions(next.decisions);
+    setSelectedId(next.selectedId);
+    setShowDismissed(false);
+    setSampleNotice(next.notice);
+    setError("");
+    return inputRevisionRef.current;
+  }
+
   function updateInput(setter, value) {
+    invalidateForInputChange();
     setter(value);
-    if (resultMode === "sample") {
-      setResult(null);
-      setResultMode(null);
-      setDecisions({});
-      setSelectedId(null);
-      setSampleNotice("The sample report was cleared because an input changed. Load a preset report again or run a live analysis.");
-    }
+  }
+
+  function completeFileRead(setter, value) {
+    inputRevisionRef.current += 1;
+    setter(value);
   }
 
   function loadSample(preset, report) {
+    inputRevisionRef.current += 1;
     setDocumentText(preset.document);
     setSourceText(preset.source);
     setResult(report);
@@ -436,9 +519,9 @@ export default function App() {
       </header>
 
       <section className="intro">
-        <span className="eyebrow">Evidence-led review</span>
-        <h1>Know what deserves a closer look.</h1>
-        <p>Score how far an AI-written document can be trusted by checking its claims against your source material.</p>
+        <span className="eyebrow">Evidence-led document review</span>
+        <h1>See what your AI-written document gets right—and what needs a closer look.</h1>
+        <p>Compare a document with its source material. Review important claims, the evidence behind them, and the issues that may need attention.</p>
       </section>
 
       {(!result || showInputs) && (
@@ -449,22 +532,53 @@ export default function App() {
               <button type="button" className="text-button" onClick={() => setShowInputs(false)}>Close</button>
             </div>
           )}
+          <section className="sample-explorer" aria-labelledby="sample-explorer-title">
+            <div className="section-intro">
+              <span className="eyebrow">Start with an example</span>
+              <h2 id="sample-explorer-title">Explore an offline sample</h2>
+              <p>See how the review works without using the live AI service.</p>
+            </div>
+            <div className="sample-grid">
+              <SampleCard
+                tone="good"
+                title="Explore a good document"
+                description="See a document whose claims match the supplied policy evidence."
+                detail="A sample report · No live analysis"
+                onClick={() => loadSample(GOOD_PRESET, GOOD_SAMPLE_REPORT)}
+              />
+              <SampleCard
+                tone="risky"
+                title="Explore a risky document"
+                description="Preview conflicting claims, an unsupported statement, a risky promise, and masked sensitive data."
+                detail="A sample report · No live analysis"
+                onClick={() => loadSample(FLAWED_PRESET, FLAWED_SAMPLE_REPORT)}
+              />
+            </div>
+          </section>
+          <div className="live-input-heading">
+            <span className="eyebrow">Your documents</span>
+            <h2>Or analyze your own documents</h2>
+            <p>Your text is checked against the source material you provide.</p>
+          </div>
           <div className="inputs">
             <InputPanel number="01" title="AI-written document" hint="Paste the document you want to review."
-                        value={documentText} onChange={(value) => updateInput(setDocumentText, value)} />
+                        value={documentText} onChange={(value) => updateInput(setDocumentText, value)}
+                        onFileRead={(value) => completeFileRead(setDocumentText, value)}
+                        onFileReadStart={invalidateForInputChange}
+                        isFileReadCurrent={(revision) => revision === inputRevisionRef.current}
+                        onFileReadError={() => setError("The selected file could not be read. Choose a valid text file and try again.")} />
             <InputPanel number="02" title="Source material" hint="Paste the trusted material the document should be checked against."
-                        value={sourceText} onChange={(value) => updateInput(setSourceText, value)} />
+                        value={sourceText} onChange={(value) => updateInput(setSourceText, value)}
+                        onFileRead={(value) => completeFileRead(setSourceText, value)}
+                        onFileReadStart={invalidateForInputChange}
+                        isFileReadCurrent={(revision) => revision === inputRevisionRef.current}
+                        onFileReadError={() => setError("The selected file could not be read. Choose a valid text file and try again.")} />
           </div>
           <div className="toolbar">
             <button className="primary-button" type="button" onClick={run} disabled={!canRun}>
               {loading ? <><span className="spinner" aria-hidden="true" /> Analyzing…</> : "Analyze document"}
             </button>
-            <button className="secondary-button" type="button"
-                    onClick={() => loadSample(GOOD_PRESET, GOOD_SAMPLE_REPORT)}
-                    disabled={loading}>Load good-document sample report</button>
-            <button className="secondary-button" type="button"
-                    onClick={() => loadSample(FLAWED_PRESET, FLAWED_SAMPLE_REPORT)}
-                    disabled={loading}>Load flawed-document sample report</button>
+            <span className="live-analysis-note">Live analysis uses the AI service. It does not fall back to a sample report.</span>
             {loading && <span role="status" className="muted">Checking claims against the source. This can take a few seconds…</span>}
           </div>
         </section>
@@ -484,7 +598,9 @@ export default function App() {
       {result && (
         <section className="review-workspace" ref={workspaceRef} aria-label="Document review workspace">
           <div className={`result-mode ${resultMode === "sample" ? "sample" : "live"}`} role="status">
-            {resultMode === "sample" ? "SAMPLE REPORT — NOT A LIVE ANALYSIS" : "LIVE ANALYSIS"}
+            {resultMode === "sample"
+              ? "SAMPLE REPORT — NOT A LIVE ANALYSIS · Offline example"
+              : "LIVE ANALYSIS · Result from the AI service"}
           </div>
           <Summary result={result} reviewedCount={reviewedCount} />
           <div className="workspace-heading">
