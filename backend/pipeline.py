@@ -6,12 +6,12 @@ from ingest import load_text_source
 from models import (Claim, EvidenceResult, PipelineResult, RiskFinding, VerificationResult)
 from retrieval import retrieve_for_claims
 from scoring import build_findings, rank_findings, score_document
-from verify import verify_claim
+from verify import verify_claims
 
 
 def verify_all(claims: list[Claim], evidence: list[EvidenceResult]) -> list[VerificationResult]:
-    """Verify each claim against ITS OWN evidence (evidence list is in the same order as claims)."""
-    return [verify_claim(claim, found.evidence_chunks) for claim, found in zip(claims, evidence)]
+    """Verify each claim against its own evidence, batching only semantic checks."""
+    return verify_claims(claims, evidence)
 
 
 def review_document(document_text: str, source_text: str, source_id: str = "SRC1") -> PipelineResult:

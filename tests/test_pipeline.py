@@ -133,12 +133,22 @@ def fake_llm(monkeypatch):
         return schema(claims=[{"sentence_id": s, "claim_text": t, "claim_type": ty} for s, t, ty in CLAIM_SCRIPT])
 
     def fake_verify(prompt, schema):
-        claim_text = prompt.split("<claim>\n")[1].split("\n</claim>")[0]
-        v, quote = VERIFY_SCRIPT[claim_text]
-        chunk_id = next(line[1:line.index("]")] for line in prompt.splitlines()
-                        if line.startswith("[") and quote in line)
-        return verify._LLMVerdict(verdict=v, explanation="scripted", evidence_chunk_ids=[chunk_id],
-                                  evidence_quote=quote, confidence=0.8)
+        results = []
+        for index, (_, claim_text, _) in enumerate(CLAIM_SCRIPT, start=1):
+            if claim_text not in prompt or claim_text not in VERIFY_SCRIPT:
+                continue
+            v, quote = VERIFY_SCRIPT[claim_text]
+            chunk_id = next(line[1:line.index("]")] for line in prompt.splitlines()
+                            if line.startswith("[") and quote in line)
+            results.append({
+                "claim_id": f"C{index}",
+                "verdict": v,
+                "explanation": "scripted",
+                "evidence_chunk_ids": [chunk_id],
+                "evidence_quote": quote,
+                "confidence": 0.8,
+            })
+        return schema(results=results)
 
     monkeypatch.setattr(claims_module, "ask_llm_json", fake_claims)
     monkeypatch.setattr(verify, "ask_llm_json", fake_verify)

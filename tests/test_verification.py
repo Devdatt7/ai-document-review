@@ -11,7 +11,7 @@ import verify
 from ingest import load_text_source
 from llm import LLMError, LLMOutputError, LLMRateLimitError
 from main import app
-from models import Claim, EvidenceChunk, VerificationResult, VerificationVerdict as V
+from models import Claim, EvidenceChunk, EvidenceResult, VerificationResult, VerificationVerdict as V
 from retrieval import retrieve_evidence
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -147,10 +147,18 @@ def test_valid_quote_is_kept(fake_gemini):
     assert r.evidence_quote == "Customized products are not eligible"
 
 
-def test_quote_with_different_line_breaks_is_still_valid(fake_gemini):
+def test_quote_with_different_line_breaks_is_rejected_as_not_exact(fake_gemini):
     chunk = make_chunk("Customized products\nare not eligible for a refund.")
     fake_gemini.answer = model_answer(V.SUPPORTED, "Customized products are not eligible", ["SRC1-P1-C1"])
-    assert verify.verify_claim(make_claim("Customized products cannot be refunded."), [chunk]).verdict == V.SUPPORTED
+    result = verify.verify_claim(make_claim("Customized products cannot be refunded."), [chunk])
+    assert result.verdict == V.UNCLEAR
+
+
+def test_exact_quote_across_line_break_is_valid(fake_gemini):
+    chunk = make_chunk("Customized products\nare not eligible for a refund.")
+    fake_gemini.answer = model_answer(V.SUPPORTED, "Customized products\nare not eligible", ["SRC1-P1-C1"])
+    result = verify.verify_claim(make_claim("Customized products cannot be refunded."), [chunk])
+    assert result.verdict == V.SUPPORTED
 
 
 def test_fabricated_quote_is_downgraded_to_unclear(fake_gemini):
@@ -224,6 +232,200 @@ def test_verify_endpoint_reports_rate_limit_as_502(monkeypatch):
     )
     assert response.status_code == 502
     assert "quota reached" in response.json()["detail"]
+
+
+def _batch_claims(count):
+    claims = []
+    evidence = []
+    for number in range(1, count + 1):
+        claim = make_claim(f"Service option {number} is available.", f"C{number}")
+        chunk = make_chunk(
+            f"Service option {number} is available to customers.",
+            f"SRC1-P1-C{number}",
+        )
+        claims.append(claim)
+        evidence.append(EvidenceResult(claim_id=claim.claim_id, evidence_chunks=[chunk]))
+    return claims, evidence
+
+
+def _batch_answer(claim, evidence, verdict=V.SUPPORTED):
+    chunk = evidence.evidence_chunks[0]
+    return {
+        "claim_id": claim.claim_id,
+        "verdict": verdict,
+        "explanation": "The source supports this claim.",
+        "evidence_chunk_ids": [chunk.chunk_id],
+        "evidence_quote": chunk.text,
+        "confidence": 0.8,
+    }
+
+
+def test_eight_semantic_claims_use_two_batch_requests(monkeypatch):
+    claims, evidence = _batch_claims(8)
+    calls = []
+
+    def fake_batch(prompt, schema):
+        calls.append(prompt)
+        return schema(results=[
+            _batch_answer(claim, evidence[index])
+            for index, claim in enumerate(claims)
+            if claim.claim_text in prompt
+        ])
+
+    monkeypatch.setattr(verify, "ask_llm_json", fake_batch)
+    results = verify.verify_claims(claims, evidence)
+
+    assert len(calls) == 2
+    assert len(results) == 8
+    assert [result.claim_id for result in results] == [claim.claim_id for claim in claims]
+    assert all(result.verdict == V.SUPPORTED for result in results)
+
+
+def test_no_evidence_and_numeric_conflict_skip_batch_requests(monkeypatch):
+    claims = [
+        make_claim("Unmatched service option is provided.", "C1"),
+        make_claim("The reimbursement cap is $50,000.", "C2"),
+        make_claim("The service is available to customers.", "C3"),
+    ]
+    evidence = [
+        EvidenceResult(claim_id="C1", evidence_chunks=[]),
+        EvidenceResult(claim_id="C2", evidence_chunks=[
+            make_chunk("The reimbursement cap is $25,000.", "SRC1-P1-C2")
+        ]),
+        EvidenceResult(claim_id="C3", evidence_chunks=[
+            make_chunk("The service is available to customers.", "SRC1-P1-C3")
+        ]),
+    ]
+    prompts = []
+
+    def fake_batch(prompt, schema):
+        prompts.append(prompt)
+        assert claims[0].claim_text not in prompt and claims[1].claim_text not in prompt
+        return schema(results=[_batch_answer(claims[2], evidence[2])])
+
+    monkeypatch.setattr(verify, "ask_llm_json", fake_batch)
+    results = verify.verify_claims(claims, evidence)
+
+    assert len(prompts) == 1
+    assert [result.verdict for result in results] == [V.UNSUPPORTED, V.CONTRADICTED, V.SUPPORTED]
+
+
+def test_batch_duplicate_claim_id_makes_ambiguous_claim_unclear(monkeypatch):
+    claims, evidence = _batch_claims(2)
+
+    def duplicate(prompt, schema):
+        return schema(results=[
+            _batch_answer(claims[0], evidence[0]),
+            _batch_answer(claims[0], evidence[0], V.CONTRADICTED),
+            _batch_answer(claims[1], evidence[1]),
+        ])
+
+    monkeypatch.setattr(verify, "ask_llm_json", duplicate)
+    results = verify.verify_claims(claims, evidence)
+    assert [result.verdict for result in results] == [V.UNCLEAR, V.SUPPORTED]
+
+
+def test_batch_unknown_claim_id_is_rejected_without_invalidating_known_results(monkeypatch):
+    claims, evidence = _batch_claims(2)
+
+    def unknown(prompt, schema):
+        return schema(results=[
+            _batch_answer(claims[0], evidence[0]),
+            _batch_answer(claims[1], evidence[1]),
+            {**_batch_answer(claims[1], evidence[1]), "claim_id": "C99"},
+        ])
+
+    monkeypatch.setattr(verify, "ask_llm_json", unknown)
+    results = verify.verify_claims(claims, evidence)
+    assert [result.verdict for result in results] == [V.SUPPORTED, V.SUPPORTED]
+
+
+def test_batch_missing_claim_result_only_marks_missing_claim_unclear(monkeypatch):
+    claims, evidence = _batch_claims(2)
+    monkeypatch.setattr(
+        verify, "ask_llm_json",
+        lambda prompt, schema: schema(results=[_batch_answer(claims[0], evidence[0])]),
+    )
+    results = verify.verify_claims(claims, evidence)
+    assert [result.verdict for result in results] == [V.SUPPORTED, V.UNCLEAR]
+
+
+def test_batch_cannot_use_another_claims_chunk(monkeypatch):
+    claims, evidence = _batch_claims(2)
+
+    def cross_cite(prompt, schema):
+        answer_a = _batch_answer(claims[0], evidence[0])
+        answer_b = _batch_answer(claims[1], evidence[1])
+        answer_b["evidence_chunk_ids"] = [evidence[0].evidence_chunks[0].chunk_id]
+        answer_b["evidence_quote"] = evidence[0].evidence_chunks[0].text
+        return schema(results=[answer_a, answer_b])
+
+    monkeypatch.setattr(verify, "ask_llm_json", cross_cite)
+    results = verify.verify_claims(claims, evidence)
+    assert [result.verdict for result in results] == [V.SUPPORTED, V.UNCLEAR]
+    assert results[1].evidence_chunk_ids == []
+
+
+def test_batch_fabricated_or_non_exact_quote_is_unclear(monkeypatch):
+    claims, evidence = _batch_claims(2)
+
+    def fabricated(prompt, schema):
+        first = _batch_answer(claims[0], evidence[0])
+        first["evidence_quote"] = "This text was not in the source."
+        second = _batch_answer(claims[1], evidence[1])
+        second["evidence_quote"] = f" {second['evidence_quote']}"
+        return schema(results=[first, second])
+
+    monkeypatch.setattr(verify, "ask_llm_json", fabricated)
+    results = verify.verify_claims(claims, evidence)
+    assert [result.verdict for result in results] == [V.UNCLEAR, V.UNCLEAR]
+
+
+def test_malformed_batch_output_retries_once_then_returns_unclear(monkeypatch):
+    claims, evidence = _batch_claims(2)
+    calls = []
+
+    def malformed(prompt, schema):
+        calls.append(prompt)
+        raise LLMOutputError("Malformed JSON.")
+
+    monkeypatch.setattr(verify, "ask_llm_json", malformed)
+    results = verify.verify_claims(claims, evidence)
+    assert len(calls) == 2
+    assert "FORMAT REPAIR" in calls[1]
+    assert all(result.verdict == V.UNCLEAR for result in results)
+
+
+def test_batch_rate_limit_is_not_retried(monkeypatch):
+    claims, evidence = _batch_claims(2)
+    calls = []
+
+    def limited(prompt, schema):
+        calls.append(prompt)
+        raise LLMRateLimitError("Gemini quota reached.")
+
+    monkeypatch.setattr(verify, "ask_llm_json", limited)
+    with pytest.raises(LLMRateLimitError, match="quota reached"):
+        verify.verify_claims(claims, evidence)
+    assert len(calls) == 1
+
+
+def test_single_claim_endpoint_contract_remains_intact(monkeypatch):
+    claim = make_claim("The office has free parking.")
+    chunk = make_chunk("Parking is available to customers at a daily charge.")
+    monkeypatch.setattr(
+        verify, "ask_llm_json",
+        lambda prompt, schema: model_answer(
+            V.CONTRADICTED, "at a daily charge", [chunk.chunk_id]
+        ),
+    )
+    response = TestClient(app).post(
+        "/claims/verify",
+        json={"claim": claim.model_dump(), "evidence_chunks": [chunk.model_dump()]},
+    )
+    assert response.status_code == 200
+    assert response.json()["claim_id"] == claim.claim_id
+    assert response.json()["verdict"] == V.CONTRADICTED
 
 
 # ---------- prompt injection ----------
