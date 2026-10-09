@@ -60,8 +60,11 @@ class VerifyRequest(BaseModel):
 
 @app.post("/claims/verify", response_model=VerificationResult)
 def claims_verify(request: VerifyRequest):
-    """Judge one claim against its retrieved evidence. Gemini problems become an UNCLEAR verdict."""
-    return verify_claim(request.claim, request.evidence_chunks)
+    """Judge one claim; provider quota failures are reported instead of hidden as UNCLEAR."""
+    try:
+        return verify_claim(request.claim, request.evidence_chunks)
+    except LLMError as error:
+        raise HTTPException(status_code=502, detail=str(error))
 
 
 class RiskRequest(BaseModel):

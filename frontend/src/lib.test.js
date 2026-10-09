@@ -1,7 +1,7 @@
 // Run with: npm test   (Node's built-in test runner, no extra packages)
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildFindingViews, describeHttpError, sentenceSeverity, splitByReview } from "./lib.js";
+import { buildFindingViews, describeHttpError, priorityBreakdown, sentenceSeverity, splitByReview } from "./lib.js";
 
 const result = {
   sentences: [
@@ -25,6 +25,7 @@ test("keeps backend ranked order and links claim, sentence and evidence", () => 
   const views = buildFindingViews(result);
   assert.deepEqual(views.map((v) => v.finding.finding_id), ["F2", "F1"]);
   assert.equal(views[1].sentenceId, "S1");
+  assert.equal(views[1].sentence.text, "The maximum reimbursement is ₹50,000.");
   assert.equal(views[1].evidenceChunks[0].chunk_id, "SRC1-P1-C2");
   assert.match(views[1].evidenceQuote, /25,000/);
 });
@@ -48,6 +49,19 @@ test("restore and accept both keep the finding open", () => {
   const views = buildFindingViews(result);
   assert.equal(splitByReview(views, {}).open.length, 2);
   assert.equal(splitByReview(views, { F1: "accepted" }).open.length, 2);
+});
+
+test("priority breakdown uses the existing consequence, verdict and risk points", () => {
+  assert.deepEqual(priorityBreakdown(result.ranked_findings[0]), [
+    { label: "CRITICAL consequence", points: 40 },
+    { label: "No verification verdict", points: 0 },
+    { label: "SENSITIVE DATA", points: 30 },
+  ]);
+  assert.deepEqual(priorityBreakdown(result.ranked_findings[1]), [
+    { label: "HIGH consequence", points: 30 },
+    { label: "CONTRADICTED", points: 30 },
+    { label: "No risk flag", points: 0 },
+  ]);
 });
 
 test("highlight uses the most severe open finding per sentence", () => {

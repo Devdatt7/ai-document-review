@@ -29,6 +29,16 @@ cd frontend
 npm run dev
 ```
 
+## Gemini usage limits
+
+The free-tier limit is set by Google for the selected model and plan; the app cannot increase it.
+An analysis uses one Gemini request to extract claims, then may use another request for each
+evidence-backed claim that the local numeric/date checks cannot decide. Claims with no evidence
+and numeric/date contradictions skip that second step. Malformed model output is retried once,
+but quota errors are not retried because that would spend more requests without restoring quota.
+If a quota error appears, check usage and reset timing in Google AI Studio, or choose a model/plan
+with limits that fit your usage.
+
 ## Test
 
 ```bash

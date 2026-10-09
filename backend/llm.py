@@ -27,6 +27,14 @@ class LLMError(Exception):
     """Any LLM problem, with a message that is safe to show to a beginner."""
 
 
+class LLMOutputError(LLMError):
+    """The model answered, but its output did not match the expected format."""
+
+
+class LLMRateLimitError(LLMError):
+    """The provider rejected a request because a rate or usage limit was reached."""
+
+
 @lru_cache(maxsize=1)
 def _client() -> genai.Client:
     """The single shared client, created on first use."""
@@ -55,8 +63,9 @@ def _generate(prompt: str, **config) -> str:
         raise
     except errors.APIError as e:
         if e.code == 429:
-            raise LLMError(
-                "Gemini rate limit reached (free tier is limited). Wait a minute and try again."
+            raise LLMRateLimitError(
+                "Gemini's rate or usage limit was reached. Limits depend on your model and plan; "
+                "wait for the quota to reset, or check your Google AI Studio usage and billing."
             ) from None
         if e.code in (400, 401, 403):
             raise LLMError(
@@ -87,4 +96,6 @@ def ask_llm_json(prompt: str, schema: type[T]) -> T:
     try:
         return schema.model_validate_json(text)
     except ValidationError:
-        raise LLMError("Gemini answered, but not in the expected JSON format. Try again.") from None
+        raise LLMOutputError(
+            "Gemini answered, but not in the expected JSON format. Try again."
+        ) from None

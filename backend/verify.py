@@ -10,7 +10,7 @@ import re
 
 from pydantic import BaseModel, Field
 
-from llm import LLMError, ask_llm_json
+from llm import LLMError, LLMOutputError, LLMRateLimitError, ask_llm_json
 from models import EvidenceChunk, Claim, VerificationResult, VerificationVerdict
 from retrieval import tokenize
 
@@ -140,10 +140,10 @@ def build_prompt(claim: Claim, chunks: list[EvidenceChunk]) -> str:
 
 
 def _ask_gemini(prompt: str) -> _LLMVerdict:
-    """One call, retried once. Raises LLMError if both tries fail."""
+    """Retry malformed model output once; do not retry provider or network errors."""
     try:
         return ask_llm_json(prompt, _LLMVerdict)
-    except LLMError:
+    except LLMOutputError:
         return ask_llm_json(prompt, _LLMVerdict)
 
 
@@ -206,6 +206,8 @@ def verify_claim(claim: Claim, evidence_chunks: list[EvidenceChunk]) -> Verifica
     # 3. Everything else: ask Gemini, then validate its answer.
     try:
         answer = _ask_gemini(build_prompt(claim, evidence_chunks))
+    except LLMRateLimitError:
+        raise
     except LLMError as error:
         return _unclear(claim, f"The claim could not be checked automatically: {error}")
     return check_model_answer(claim, answer, evidence_chunks)

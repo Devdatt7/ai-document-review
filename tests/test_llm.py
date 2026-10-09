@@ -41,7 +41,7 @@ def test_live_hello_gemini():
     try:
         answer = llm.ask_llm("Return exactly: HELLO_GEMINI")
     except llm.LLMError as error:
-        if "rate limit" in str(error):  # free-tier quota is not a code bug
+        if isinstance(error, llm.LLMRateLimitError):  # provider quota is not a code bug
             pytest.skip("Gemini free-tier rate limit reached")
         raise
     assert "HELLO_GEMINI" in answer

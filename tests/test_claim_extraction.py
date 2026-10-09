@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import claims
-from llm import LLMError
+from llm import LLMError, LLMOutputError, LLMRateLimitError
 from main import app
 from models import ClaimType
 
@@ -112,7 +112,7 @@ def test_unknown_sentence_id_is_rejected_after_one_retry(monkeypatch):
         return fake_llm(("S99", "made up", ClaimType.general))(prompt, schema)
 
     monkeypatch.setattr(claims, "ask_llm_json", bad)
-    with pytest.raises(LLMError, match="unknown sentence id"):
+    with pytest.raises(LLMOutputError, match="unknown sentence id"):
         claims.extract_claims("Only sentence.")
     assert len(calls) == 2  # first try + exactly one retry
 
@@ -124,7 +124,7 @@ def test_invalid_llm_response_retries_once_then_succeeds(monkeypatch):
     def flaky(prompt, schema):
         calls.append(1)
         if len(calls) == 1:
-            raise LLMError("Gemini answered, but not in the expected JSON format.")
+            raise LLMOutputError("Gemini answered, but not in the expected JSON format.")
         return good(prompt, schema)
 
     monkeypatch.setattr(claims, "ask_llm_json", flaky)
@@ -132,12 +132,29 @@ def test_invalid_llm_response_retries_once_then_succeeds(monkeypatch):
 
 
 def test_invalid_llm_response_fails_clearly_never_fake_claims(monkeypatch):
+    calls = []
+
     def always_bad(prompt, schema):
-        raise LLMError("Gemini answered, but not in the expected JSON format.")
+        calls.append(1)
+        raise LLMOutputError("Gemini answered, but not in the expected JSON format.")
 
     monkeypatch.setattr(claims, "ask_llm_json", always_bad)
-    with pytest.raises(LLMError):
+    with pytest.raises(LLMOutputError):
         claims.extract_claims("Only sentence.")
+    assert len(calls) == 2
+
+
+def test_rate_limit_is_not_retried(monkeypatch):
+    calls = []
+
+    def limited(prompt, schema):
+        calls.append(1)
+        raise LLMRateLimitError("Gemini quota reached.")
+
+    monkeypatch.setattr(claims, "ask_llm_json", limited)
+    with pytest.raises(LLMRateLimitError, match="quota reached"):
+        claims.extract_claims("Only sentence.")
+    assert len(calls) == 1
 
 
 def test_prompt_contains_python_sentence_ids():

@@ -3,6 +3,19 @@
 
 export const CONSEQUENCE_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 
+const CONSEQUENCE_POINTS = { LOW: 10, MEDIUM: 20, HIGH: 30, CRITICAL: 40 };
+const VERDICT_POINTS = { CONTRADICTED: 30, UNSUPPORTED: 22, UNCLEAR: 12, SUPPORTED: 0 };
+const RISK_POINTS = { SENSITIVE_DATA: 30, RISKY_COMMITMENT: 25 };
+
+// Explain the backend's established priority formula without changing its score or ordering.
+export function priorityBreakdown(finding) {
+  return [
+    { label: `${finding.consequence} consequence`, points: CONSEQUENCE_POINTS[finding.consequence] ?? 0 },
+    { label: finding.verdict || "No verification verdict", points: VERDICT_POINTS[finding.verdict] ?? 0 },
+    { label: finding.risk_type?.replaceAll("_", " ") || "No risk flag", points: RISK_POINTS[finding.risk_type] ?? 0 },
+  ];
+}
+
 // Pair each finding with the claim, sentence and evidence the backend already returned.
 // Findings keep the backend's ranked order.
 export function buildFindingViews(result) {
@@ -25,6 +38,7 @@ export function buildFindingViews(result) {
     return {
       finding,
       claim,
+      sentence,
       verification,
       sentenceId: sentenceId || null,
       // Document-level findings (PII) have no claim; show the masked text the backend returned.

@@ -4,7 +4,7 @@ import re
 
 from pydantic import BaseModel, Field, ValidationError
 
-from llm import LLMError, ask_llm_json
+from llm import LLMError, LLMOutputError, ask_llm_json
 from models import Claim, ClaimExtractionResult, ClaimType, Sentence
 
 
@@ -63,7 +63,7 @@ def _ask_for_claims(sentences: list[Sentence]) -> list[Claim]:
     claims = []
     for item in answer.claims:
         if item.sentence_id not in known_ids:
-            raise LLMError(f"Gemini returned an unknown sentence id '{item.sentence_id}'.")
+            raise LLMOutputError(f"Gemini returned an unknown sentence id '{item.sentence_id}'.")
         try:
             claims.append(
                 Claim(
@@ -74,7 +74,7 @@ def _ask_for_claims(sentences: list[Sentence]) -> list[Claim]:
                 )
             )
         except ValidationError:
-            raise LLMError("Gemini returned an invalid claim.") from None
+            raise LLMOutputError("Gemini returned an invalid claim.") from None
     return claims
 
 
@@ -86,7 +86,7 @@ def extract_claims(document_text: str) -> ClaimExtractionResult:
     # Try once more if the first answer is unusable; never invent claims on failure.
     try:
         claims = _ask_for_claims(sentences)
-    except LLMError:
+    except LLMOutputError:
         claims = _ask_for_claims(sentences)
 
     return ClaimExtractionResult(sentences=sentences, claims=claims)

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 import llm
 import verify
 from ingest import load_text_source
-from llm import LLMError
+from llm import LLMError, LLMOutputError, LLMRateLimitError
 from main import app
 from models import Claim, EvidenceChunk, VerificationResult, VerificationVerdict as V
 from retrieval import retrieve_evidence
@@ -48,7 +48,7 @@ def fake_gemini(monkeypatch):
         fake.calls += 1
         fake.prompts.append(prompt)
         if fake.calls <= fake.errors_before_answer:
-            raise LLMError("Gemini answered, but not in the expected JSON format. Try again.")
+            raise LLMOutputError("Gemini answered, but not in the expected JSON format. Try again.")
         return fake.answer
 
     monkeypatch.setattr(verify, "ask_llm_json", fake_ask)
@@ -195,6 +195,35 @@ def test_retry_succeeds_on_second_try(fake_gemini):
     r = verify.verify_claim(make_claim("Customized products cannot be refunded."), [make_chunk(REFUND)])
     assert r.verdict == V.SUPPORTED
     assert fake_gemini.calls == 2
+
+
+def test_rate_limit_is_not_retried_or_hidden(monkeypatch):
+    calls = []
+
+    def limited(prompt, schema):
+        calls.append(1)
+        raise LLMRateLimitError("Gemini quota reached.")
+
+    monkeypatch.setattr(verify, "ask_llm_json", limited)
+    with pytest.raises(LLMRateLimitError, match="quota reached"):
+        verify.verify_claim(make_claim("Refunds are quick."), [make_chunk(REFUND)])
+    assert len(calls) == 1
+
+
+def test_verify_endpoint_reports_rate_limit_as_502(monkeypatch):
+    def limited(prompt, schema):
+        raise LLMRateLimitError("Gemini quota reached.")
+
+    monkeypatch.setattr(verify, "ask_llm_json", limited)
+    response = TestClient(app).post(
+        "/claims/verify",
+        json={
+            "claim": make_claim("Refunds are quick.").model_dump(),
+            "evidence_chunks": [make_chunk(REFUND).model_dump()],
+        },
+    )
+    assert response.status_code == 502
+    assert "quota reached" in response.json()["detail"]
 
 
 # ---------- prompt injection ----------
