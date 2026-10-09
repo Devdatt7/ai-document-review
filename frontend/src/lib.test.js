@@ -7,11 +7,18 @@ import {
   assessmentAfterInputChange,
   buildFindingViews,
   describeHttpError,
+  groupByPriority,
+  priorityBand,
   priorityBreakdown,
+  priorityBreakdownSegments,
+  priorityExplanation,
+  priorityProgress,
+  reviewDecisionTransition,
   sentenceSeverity,
   splitByReview,
 } from "./lib.js";
 import { DEMO_SOURCE, FLAWED_DOCUMENT, GOOD_DOCUMENT } from "./demo.js";
+import { describeAuthError, guardRoute, parseRoute, validateAuthForm } from "./authValidation.js";
 import { FLAWED_SAMPLE_REPORT, GOOD_SAMPLE_REPORT } from "./sampleReports.js";
 import {
   createSourceChangeDemo,
@@ -80,6 +87,118 @@ test("priority breakdown uses the existing consequence, verdict and risk points"
     { label: "CONTRADICTED", points: 30 },
     { label: "No risk flag", points: 0 },
   ]);
+});
+
+test("priority bands classify every requested boundary score", () => {
+  assert.deepEqual([39, 40, 59, 60, 79, 80].map(priorityBand),
+    ["lower", "medium", "medium", "high", "high", "highest"]);
+});
+
+test("priority triage groups preserve backend order within each score band", () => {
+  const views = buildFindingViews(FLAWED_SAMPLE_REPORT);
+  assert.deepEqual(groupByPriority(views).map((group) => [
+    group.id,
+    group.findings.map((view) => view.finding.finding_id),
+  ]), [
+    ["highest", ["F3"]],
+    ["high", ["F6", "F1", "F2"]],
+    ["medium", ["F4"]],
+    ["lower", ["F5"]],
+  ]);
+});
+
+test("stacked breakdown segments sum to score and use proportional widths", () => {
+  const finding = FLAWED_SAMPLE_REPORT.ranked_findings[0];
+  const segments = priorityBreakdownSegments(finding);
+  assert.deepEqual(segments.map(({ key, points, width }) => ({ key, points, width })), [
+    { key: "consequence", points: 40, width: 40 },
+    { key: "verdict", points: 30, width: 30 },
+    { key: "risk", points: 25, width: 25 },
+  ]);
+  assert.equal(segments.reduce((sum, part) => sum + part.width, 0), finding.priority_score);
+  assert.match(priorityExplanation(finding), /40 for critical consequence, 30 from the contradicted verdict, and 25 from the risky commitment flag/);
+  assert.match(priorityExplanation(finding), /heuristics/);
+});
+
+test("priority points reviewed is dynamic and safe for zero findings", () => {
+  const views = buildFindingViews(FLAWED_SAMPLE_REPORT);
+  const decisions = { F3: "accepted", F6: "dismissed" };
+  const progress = priorityProgress(views, decisions);
+  assert.equal(progress.reviewedCount, 2);
+  assert.equal(progress.totalCount, 6);
+  assert.equal(progress.pointsReviewed, 165);
+  assert.equal(progress.totalPoints, 367);
+  assert.equal(progress.percentage, Math.round((165 / 367) * 100));
+  assert.deepEqual(priorityProgress([], {}), {
+    reviewedCount: 0,
+    totalCount: 0,
+    pointsReviewed: 0,
+    totalPoints: 0,
+    percentage: 0,
+  });
+});
+
+test("review decisions advance through ranked unreviewed findings without changing assessment data", () => {
+  const reportSnapshot = structuredClone(FLAWED_SAMPLE_REPORT);
+  const views = buildFindingViews(FLAWED_SAMPLE_REPORT);
+  const first = reviewDecisionTransition(views, {}, "F3", "accepted");
+  assert.equal(first.selectedId, "F6");
+  assert.equal(first.decisions.F3, "accepted");
+  assert.equal(splitByReview(views, first.decisions).open.length, 6,
+    "confirmed issues remain open in the system assessment");
+
+  const second = reviewDecisionTransition(views, first.decisions, "F6", "dismissed");
+  assert.equal(second.selectedId, "F1");
+  assert.equal(second.decisions.F6, "dismissed");
+  assert.deepEqual(FLAWED_SAMPLE_REPORT, reportSnapshot);
+  assert.equal(FLAWED_SAMPLE_REPORT.score.trust_score, 18);
+  assert.equal(FLAWED_SAMPLE_REPORT.status, "BLOCKED");
+});
+
+test("document back navigation preserves the current assessment and simulation state", () => {
+  const appSource = sampleFile("./App.jsx");
+  const documentNavigation = appSource.match(
+    /function returnToDocuments\(\) \{([\s\S]*?)\n  \}/,
+  )?.[1];
+  const reportNavigation = appSource.match(
+    /function returnToMainReport\(\) \{([\s\S]*?)\n  \}/,
+  )?.[1];
+
+  assert.ok(documentNavigation, "document navigation handler should exist");
+  assert.match(documentNavigation, /setShowInputs\(true\)/);
+  assert.match(documentNavigation, /inputWorkspaceRef\.current\?\.scrollIntoView/);
+  assert.doesNotMatch(documentNavigation, /setResult|setResultMode|setDecisions|setSelectedId|run\(|analyzeDocument/);
+  assert.match(appSource, /className="back-documents-button" onClick=\{returnToDocuments\}/);
+  assert.match(appSource, /className="text-button" onClick=\{returnToDocuments\}>Edit documents/);
+
+  assert.ok(reportNavigation, "simulation report navigation handler should exist");
+  assert.match(reportNavigation, /reviewHeadingRef\.current\?\.scrollIntoView/);
+  assert.doesNotMatch(reportNavigation, /setResult|setResultMode|setDecisions|setSelectedId|setSourceChangeSimulated|resetPolicyUpdate|run\(|analyzeDocument/);
+  assert.match(appSource, /onReturnToReport=\{returnToMainReport\}/);
+  assert.match(appSource, /onClick=\{onReturnToReport\}>\s*Return to main review report/);
+});
+
+test("auth forms validate email, password length and confirmation", () => {
+  assert.deepEqual(validateAuthForm({ mode: "login", email: "a@b.co", password: "x" }), {});
+  assert.ok(validateAuthForm({ mode: "login", email: "nope", password: "" }).email);
+  assert.ok(validateAuthForm({ mode: "login", email: "a@b.co", password: "" }).password);
+  assert.ok(validateAuthForm({ mode: "register", email: "a@b.co", password: "short", confirmPassword: "short" }).password);
+  assert.ok(validateAuthForm({ mode: "register", email: "a@b.co", password: "longenough", confirmPassword: "different" }).confirmPassword);
+  assert.deepEqual(validateAuthForm({ mode: "register", email: "a@b.co", password: "longenough", confirmPassword: "longenough" }), {});
+});
+
+test("auth errors are readable and routes are guarded by session", () => {
+  assert.match(describeAuthError({ message: "Invalid login credentials" }), /Incorrect email or password/);
+  assert.match(describeAuthError({ message: "User already registered" }), /already exists/);
+  assert.match(describeAuthError({ message: "boom" }), /Authentication failed/);
+  assert.equal(parseRoute(""), "/");
+  assert.equal(parseRoute("#/login"), "/login");
+  assert.equal(parseRoute("#/unknown"), "/");
+  assert.equal(guardRoute("/app", false), "/login");
+  assert.equal(guardRoute("/app", true), "/app");
+  assert.equal(guardRoute("/login", true), "/app");
+  assert.equal(guardRoute("/register", false), "/register");
+  assert.equal(guardRoute("/", false), "/");
 });
 
 test("highlight uses the most severe open finding per sentence", () => {

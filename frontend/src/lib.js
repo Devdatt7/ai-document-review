@@ -28,6 +28,89 @@ export function priorityBreakdown(finding) {
   ];
 }
 
+export const PRIORITY_BANDS = [
+  { id: "highest", label: "Highest priority", range: "80–100", min: 80 },
+  { id: "high", label: "High priority", range: "60–79", min: 60 },
+  { id: "medium", label: "Medium priority", range: "40–59", min: 40 },
+  { id: "lower", label: "Lower priority", range: "0–39", min: 0 },
+];
+
+export function priorityBand(score) {
+  if (score >= 80) return "highest";
+  if (score >= 60) return "high";
+  if (score >= 40) return "medium";
+  return "lower";
+}
+
+export function groupByPriority(views) {
+  return PRIORITY_BANDS.map((band) => ({
+    ...band,
+    findings: views.filter((view) => priorityBand(view.finding.priority_score) === band.id),
+  }));
+}
+
+export function priorityBreakdownSegments(finding) {
+  const segments = priorityBreakdown(finding);
+  const keys = ["consequence", "verdict", "risk"];
+  const labels = ["Consequence points", "Verdict points", "Risk-flag points"];
+  return segments.map((segment, index) => ({
+    key: keys[index],
+    label: labels[index],
+    points: segment.points,
+    width: segment.points,
+  }));
+}
+
+export function priorityExplanation(finding) {
+  const [consequence, verdict, risk] = priorityBreakdown(finding);
+  const riskText = finding.risk_type
+    ? `${risk.points} from the ${risk.label.toLowerCase()} flag`
+    : "no points from a risk flag";
+  const verdictText = finding.verdict
+    ? `${verdict.points} from the ${finding.verdict.toLowerCase()} verdict`
+    : "no points from a verification verdict";
+  return `Priority ${Math.round(finding.priority_score)}/100: ${consequence.points} for ${finding.consequence.toLowerCase()} consequence, ${verdictText}, and ${riskText}. These are review-priority heuristics.`;
+}
+
+export function priorityProgress(views, decisions) {
+  const totalPoints = views.reduce(
+    (total, view) => total + Math.max(0, Number(view.finding.priority_score) || 0),
+    0,
+  );
+  const reviewed = views.filter((view) => Boolean(decisions[view.finding.finding_id]));
+  const pointsReviewed = reviewed.reduce(
+    (total, view) => total + Math.max(0, Number(view.finding.priority_score) || 0),
+    0,
+  );
+  return {
+    reviewedCount: reviewed.length,
+    totalCount: views.length,
+    pointsReviewed,
+    totalPoints,
+    percentage: totalPoints > 0 ? Math.round((pointsReviewed / totalPoints) * 100) : 0,
+  };
+}
+
+export function reviewDecisionTransition(views, decisions, findingId, decision) {
+  const nextDecisions = { ...decisions };
+  if (decision) nextDecisions[findingId] = decision;
+  else delete nextDecisions[findingId];
+
+  const currentIndex = views.findIndex((view) => view.finding.finding_id === findingId);
+  let selectedId = findingId;
+  if (decision === "accepted" || decision === "dismissed") {
+    const orderedViews = currentIndex < 0
+      ? views
+      : [...views.slice(currentIndex + 1), ...views.slice(0, currentIndex)];
+    const nextUnreviewed = orderedViews.find(
+      (view) => !nextDecisions[view.finding.finding_id],
+    );
+    if (nextUnreviewed) selectedId = nextUnreviewed.finding.finding_id;
+  }
+
+  return { decisions: nextDecisions, selectedId };
+}
+
 // Pair each finding with the claim, sentence and evidence the backend already returned.
 // Findings keep the backend's ranked order.
 export function buildFindingViews(result) {

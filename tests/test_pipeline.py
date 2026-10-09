@@ -217,13 +217,10 @@ def test_analyze_endpoint(fake_llm):
 
 def test_analyze_without_key_returns_clear_error(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
     monkeypatch.setattr("llm.load_dotenv", lambda *a, **k: None, raising=False)
-    import llm
-    llm._client.cache_clear()  # a client cached by an earlier live test would still hold the real key
-    try:
-        response = client.post("/analyze", json={"document_text": "Fees are 5.", "source_text": SOURCE})
-    finally:
-        llm._client.cache_clear()
+    response = client.post("/analyze", json={"document_text": "Fees are 5.", "source_text": SOURCE})
     assert response.status_code == 502
     assert "detail" in response.json()
 

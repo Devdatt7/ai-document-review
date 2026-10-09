@@ -4,7 +4,12 @@ import { FLAWED_PRESET, GOOD_PRESET } from "./demo.js";
 import {
   assessmentAfterInputChange,
   buildFindingViews,
-  priorityBreakdown,
+  groupByPriority,
+  priorityBand,
+  priorityBreakdownSegments,
+  priorityExplanation,
+  priorityProgress,
+  reviewDecisionTransition,
   sentenceSeverity,
   splitByReview,
 } from "./lib.js";
@@ -53,7 +58,7 @@ function SampleCard({ tone, title, description, detail, onClick }) {
   );
 }
 
-function SourceChangeRecheck({ report, simulated, onSimulate, onReset }) {
+function SourceChangeRecheck({ report, simulated, onSimulate, onReset, onReturnToReport }) {
   const previousScore = FLAWED_SAMPLE_REPORT.score;
   const currentScore = report.score;
   const currentVerification = report.verification_results.find((item) => item.claim_id === "C1");
@@ -123,7 +128,12 @@ function SourceChangeRecheck({ report, simulated, onSimulate, onReset }) {
               <small>{currentScore.finding_count} findings</small>
             </div>
           </div>
-          <button type="button" className="secondary-button" onClick={onReset}>Reset Simulation</button>
+          <div className="source-change-actions">
+            <button type="button" className="secondary-button" onClick={onReset}>Reset Simulation</button>
+            <button type="button" className="text-button" onClick={onReturnToReport}>
+              Return to main review report
+            </button>
+          </div>
         </>
       )}
     </section>
@@ -231,8 +241,11 @@ function Summary({ result, reviewedCount }) {
 
 function FindingQueueItem({ view, rank, decision, selected, onSelect }) {
   const { finding, affectedText } = view;
+  const score = Math.max(0, Math.min(100, Number(finding.priority_score) || 0));
+  const band = priorityBand(score);
   return (
-    <button type="button" className={`queue-item ${finding.consequence} ${selected ? "selected" : ""}`}
+    <button id={`finding-${finding.finding_id}`} type="button"
+            className={`queue-item ${finding.consequence} priority-${band} ${selected ? "selected" : ""}`}
             aria-pressed={selected} onClick={onSelect}>
       <span className="queue-rank">{String(rank).padStart(2, "0")}</span>
       <span className="queue-content">
@@ -242,6 +255,11 @@ function FindingQueueItem({ view, rank, decision, selected, onSelect }) {
           {finding.risk_type && <span className="queue-type">{finding.risk_type.replaceAll("_", " ")}</span>}
         </span>
         <span className="queue-excerpt">{affectedText || "Finding text is unavailable."}</span>
+        <span className={`priority-meter ${band}`} role="meter"
+              aria-label={`Priority score ${score} out of 100`}
+              aria-valuemin={0} aria-valuemax={100} aria-valuenow={score}>
+          <span style={{ width: `${score}%` }} />
+        </span>
         <span className="queue-foot">
           <span className="priority-badge">
             <span>Priority</span>
@@ -350,7 +368,7 @@ function FindingDetails({ view, rank, decision, onDecide }) {
   const { finding, claim, verification, affectedText, sentenceId } = view;
   const isDismissed = decision === "dismissed";
   const isSensitive = finding.risk_type === "SENSITIVE_DATA";
-  const breakdown = priorityBreakdown(finding);
+  const breakdown = priorityBreakdownSegments(finding);
   const verdict = finding.verdict || verification?.verdict;
   const assessment = isSensitive ? "Sensitive data"
     : finding.risk_type === "RISKY_COMMITMENT" ? "Risky commitment"
@@ -396,12 +414,23 @@ function FindingDetails({ view, rank, decision, onDecide }) {
 
       <section className="detail-section ranking-section">
         <h3>Why this priority</h3>
-        <p className="body-copy">The review queue ranks higher priority scores first. This score combines consequence, verdict, and any risk flag.</p>
-        <div className="priority-breakdown">
-          {breakdown.map((part) => (
-            <span key={part.label}>{part.label}<strong>+{part.points}</strong></span>
+        <p className="body-copy">{priorityExplanation(finding)}</p>
+        <div className="priority-stack" role="img"
+             aria-label={`Priority composition: ${breakdown.map((part) => `${part.label} ${part.points}`).join(", ")}`}>
+          {breakdown.filter((part) => part.points > 0).map((part) => (
+            <span key={part.key} className={`priority-segment ${part.key}`}
+                  style={{ width: `${part.width}%` }} />
           ))}
         </div>
+        <ul className="priority-legend">
+          {breakdown.map((part) => (
+            <li key={part.key}>
+              <span className={`priority-legend-dot ${part.key}`} aria-hidden="true" />
+              {part.label}
+              <strong>{part.points}</strong>
+            </li>
+          ))}
+        </ul>
         <p className="priority-total">Backend priority score <strong>{Math.round(finding.priority_score)} / 100</strong></p>
       </section>
 
@@ -466,7 +495,7 @@ function DocumentContext({ sentences, severity, selectedSentenceId, onPick, refs
   );
 }
 
-export default function App() {
+export default function App({ user = null, onSignOut = null }) {
   const [documentText, setDocumentText] = useState("");
   const [sourceText, setSourceText] = useState("");
   const [loading, setLoading] = useState(false);
@@ -479,8 +508,11 @@ export default function App() {
   const [decisions, setDecisions] = useState({});
   const [selectedId, setSelectedId] = useState(null);
   const [showDismissed, setShowDismissed] = useState(false);
+  const [showLowerPriority, setShowLowerPriority] = useState(false);
   const [showInputs, setShowInputs] = useState(true);
   const workspaceRef = useRef(null);
+  const inputWorkspaceRef = useRef(null);
+  const reviewHeadingRef = useRef(null);
   const sentenceRefs = useRef({});
   const inputRevisionRef = useRef(0);
 
@@ -490,6 +522,18 @@ export default function App() {
   const selected = views.find((view) => view.finding.finding_id === selectedId) || null;
   const reviewedCount = views.filter((view) => decisions[view.finding.finding_id]).length;
   const selectedRank = selected ? views.indexOf(selected) + 1 : 0;
+  const priorityGroups = useMemo(() => groupByPriority(open), [open]);
+  const progress = useMemo(() => priorityProgress(views, decisions), [views, decisions]);
+  const nextUp = views.find((view) => !decisions[view.finding.finding_id]) || null;
+
+  function returnToDocuments() {
+    setShowInputs(true);
+    requestAnimationFrame(() => inputWorkspaceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
+
+  function returnToMainReport() {
+    requestAnimationFrame(() => reviewHeadingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
 
   useEffect(() => {
     const el = selected?.sentenceId && sentenceRefs.current[selected.sentenceId];
@@ -503,6 +547,7 @@ export default function App() {
     setSampleNotice("");
     setSampleKind(null);
     setSourceChangeSimulated(false);
+    setShowLowerPriority(false);
     try {
       const data = await analyzeDocument(documentText, sourceText);
       if (requestRevision !== inputRevisionRef.current) {
@@ -539,6 +584,7 @@ export default function App() {
     setResultMode(next.resultMode);
     setSampleKind(null);
     setSourceChangeSimulated(false);
+    setShowLowerPriority(false);
     setDecisions(next.decisions);
     setSelectedId(next.selectedId);
     setShowDismissed(false);
@@ -565,6 +611,7 @@ export default function App() {
     setResultMode("sample");
     setSampleKind(kind);
     setSourceChangeSimulated(false);
+    setShowLowerPriority(false);
     setSampleNotice("");
     setError("");
     setDecisions({});
@@ -596,46 +643,86 @@ export default function App() {
 
   function decide(id, value) {
     if (!id) return;
-    setDecisions((current) => {
-      const next = { ...current };
-      if (value) next[id] = value;
-      else delete next[id];
-      return next;
+    const transition = reviewDecisionTransition(views, decisions, id, value);
+    setDecisions(transition.decisions);
+    setSelectedId(transition.selectedId);
+    const nextFinding = views.find((view) => view.finding.finding_id === transition.selectedId);
+    setShowDismissed(Boolean(nextFinding && transition.decisions[transition.selectedId] === "dismissed"));
+    if (nextFinding && priorityBand(nextFinding.finding.priority_score) === "lower") {
+      setShowLowerPriority(true);
+    }
+    requestAnimationFrame(() => {
+      document.getElementById(`finding-${transition.selectedId}`)?.scrollIntoView?.({
+        behavior: "smooth",
+        block: "nearest",
+      });
     });
   }
 
   function selectFinding(view) {
     setSelectedId(view.finding.finding_id);
-    if (decisions[view.finding.finding_id] === "dismissed") setShowDismissed(true);
+    const isDismissed = decisions[view.finding.finding_id] === "dismissed";
+    if (isDismissed) setShowDismissed(true);
+    if (priorityBand(view.finding.priority_score) === "lower") setShowLowerPriority(true);
+    requestAnimationFrame(() => {
+      document.getElementById(`finding-${view.finding.finding_id}`)?.scrollIntoView?.({
+        behavior: "smooth",
+        block: "nearest",
+      });
+    });
+  }
+
+  function startWithHighestPriority() {
+    const highest = views[0];
+    if (highest) selectFinding(highest);
   }
 
   function pickSentence(sentenceId) {
     const first = open.find((view) => view.sentenceId === sentenceId);
     if (!first) return setSelectedId(null);
-    setSelectedId(first.finding.finding_id);
+    selectFinding(first);
     document.getElementById(`finding-${first.finding.finding_id}`)?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
   }
 
   const canRun = documentText.trim() && sourceText.trim() && !loading;
+  const displayName = (user?.user_metadata?.full_name || user?.email?.split("@")[0] || "there").trim().split(/\s+/)[0];
 
   return (
     <main className="app">
       <header className="app-header">
-        <a className="brand" href="#" aria-label="AI Document Review home">
+        <a className="brand" href="#/" aria-label="AI Document Review home">
           <BrandMark />
           <span>AI Document Review</span>
         </a>
-        <div className="header-caption">EVIDENCE REVIEW WORKSPACE</div>
+        <div className="header-account">
+          <span className="header-caption">EVIDENCE REVIEW WORKSPACE</span>
+          {user && onSignOut && (
+            <>
+              <span className="account-chip" title={user.email}>
+                <span className="avatar" aria-hidden="true">{displayName.charAt(0).toUpperCase()}</span>
+                <span className="account-email">{user.email}</span>
+              </span>
+              <button type="button" className="text-button" onClick={onSignOut}>Sign out</button>
+            </>
+          )}
+        </div>
       </header>
 
       <section className="intro">
-        <span className="eyebrow">Evidence-led document review</span>
-        <h1>See what your AI-written document gets right—and what needs a closer look.</h1>
-        <p>Compare a document with its source material. Review important claims, the evidence behind them, and the issues that may need attention.</p>
+        <div className="intro-copy">
+          <span className="eyebrow">{user ? `Welcome back, ${displayName}` : "Evidence-led document review"}</span>
+          <h1>See what your AI-written document gets right—and what needs a closer look.</h1>
+          <p>Compare a document with its source material. Review important claims, the evidence behind them, and the issues that may need attention.</p>
+        </div>
+        <ol className="intro-steps" aria-label="How to use the workspace">
+          <li><span>1</span><div><strong>Choose a start</strong><small>Open an offline sample or paste your own text.</small></div></li>
+          <li><span>2</span><div><strong>Analyze</strong><small>Claims are checked against your source.</small></div></li>
+          <li><span>3</span><div><strong>Review by priority</strong><small>Start with the highest-scoring finding.</small></div></li>
+        </ol>
       </section>
 
       {(!result || showInputs) && (
-        <section className="input-workspace" aria-label="Documents to review">
+        <section className="input-workspace" ref={inputWorkspaceRef} aria-label="Documents to review">
           {result && (
             <div className="edit-heading">
               <div><h2>Update source documents</h2><p>Run a new analysis to replace the current assessment.</p></div>
@@ -699,7 +786,7 @@ export default function App() {
       {result && !showInputs && (
         <div className="edit-documents">
           <span>Assessment of the current document and source</span>
-          <button type="button" className="text-button" onClick={() => setShowInputs(true)}>Edit documents</button>
+          <button type="button" className="text-button" onClick={returnToDocuments}>Edit documents</button>
         </div>
       )}
 
@@ -707,6 +794,11 @@ export default function App() {
 
       {result && (
         <section className="review-workspace" ref={workspaceRef} aria-label="Document review workspace">
+          <div className="review-workspace-nav">
+            <button type="button" className="back-documents-button" onClick={returnToDocuments}>
+              <span aria-hidden="true">←</span> Back to documents
+            </button>
+          </div>
           <div className={`result-mode ${resultMode === "sample" ? "sample" : "live"}`} role="status">
             {resultMode === "sample"
               ? "SAMPLE REPORT — NOT A LIVE ANALYSIS · Offline example"
@@ -719,9 +811,10 @@ export default function App() {
               simulated={sourceChangeSimulated}
               onSimulate={simulatePolicyUpdate}
               onReset={resetPolicyUpdate}
+              onReturnToReport={returnToMainReport}
             />
           )}
-          <div className="workspace-heading">
+          <div className="workspace-heading" ref={reviewHeadingRef}>
             <div>
               <span className="eyebrow">Review workspace</span>
               <h2>Ranked findings</h2>
@@ -735,19 +828,90 @@ export default function App() {
                 <h3>Needs attention</h3>
                 <span>{open.length}</span>
               </div>
+              <div className="queue-guidance">
+                <strong>Sorted by priority score</strong>
+                <span>Priority combines consequence, verdict and risk flags.</span>
+              </div>
+              <div className="triage-controls">
+                <button type="button" className="start-priority-button" onClick={startWithHighestPriority}
+                        disabled={views.length === 0}>
+                  Start with highest priority
+                </button>
+                <div className="priority-progress" aria-label="Reviewer progress">
+                  <div className="priority-progress-copy">
+                    <strong>Findings with a reviewer decision</strong>
+                    <span>{progress.reviewedCount} / {progress.totalCount}</span>
+                  </div>
+                  <progress max="100" value={progress.percentage}
+                            aria-label={`Priority points reviewed: ${progress.percentage}%`} />
+                  <div className="priority-progress-copy subtle">
+                    <span>Priority points reviewed</span>
+                    <span>{progress.pointsReviewed} / {progress.totalPoints} · {progress.percentage}%</span>
+                  </div>
+                  <p>Priority scores are manually designed review heuristics, not a measure of harm eliminated.</p>
+                </div>
+                {nextUp ? (
+                  <div className="next-up">
+                    <span className="eyebrow">Next up</span>
+                    <strong className="next-up-claim">{nextUp.affectedText || "Finding text is unavailable."}</strong>
+                    <span className="next-up-meta">
+                      {nextUp.finding.consequence} · Priority {Math.round(nextUp.finding.priority_score)}
+                    </span>
+                    <button type="button" className="text-button"
+                            onClick={() => selectFinding(nextUp)}>Review next finding</button>
+                  </div>
+                ) : progress.totalCount > 0 ? (
+                  <p className="review-complete" role="status">
+                    Review decisions have been recorded. Confirmed issues may still require action; the system assessment above is unchanged.
+                  </p>
+                ) : null}
+              </div>
               {open.length === 0 ? (
                 <p className="empty-queue">No findings remain open. This does not change the system assessment above.</p>
               ) : (
-                <div className="queue-list">
-                  {open.map((view) => {
-                    const rank = views.indexOf(view) + 1;
-                    return (
-                      <FindingQueueItem key={view.finding.finding_id} view={view} rank={rank}
-                        decision={decisions[view.finding.finding_id]}
-                        selected={selectedId === view.finding.finding_id}
-                        onSelect={() => selectFinding(view)} />
-                    );
-                  })}
+                <div className="priority-groups">
+                  {priorityGroups.filter((group) => group.findings.length > 0).map((group) => (
+                    <section className={`priority-group ${group.id}`} key={group.id}>
+                      {group.id === "lower" ? (
+                        <>
+                          <button type="button" className="priority-group-toggle"
+                                  aria-expanded={showLowerPriority}
+                                  onClick={() => setShowLowerPriority((value) => !value)}>
+                            <span>{showLowerPriority ? "−" : "+"}</span>
+                            <span>{group.label} <small>{group.range}</small></span>
+                            <strong>{group.findings.length}</strong>
+                          </button>
+                          {showLowerPriority && (
+                            <div className="queue-list">
+                              {group.findings.map((view) => (
+                                <FindingQueueItem key={view.finding.finding_id} view={view}
+                                  rank={views.indexOf(view) + 1}
+                                  decision={decisions[view.finding.finding_id]}
+                                  selected={selectedId === view.finding.finding_id}
+                                  onSelect={() => selectFinding(view)} />
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <h4 className="priority-group-heading">
+                            {group.label} <span>{group.range}</span>
+                            <strong>{group.findings.length}</strong>
+                          </h4>
+                          <div className="queue-list">
+                            {group.findings.map((view) => (
+                              <FindingQueueItem key={view.finding.finding_id} view={view}
+                                rank={views.indexOf(view) + 1}
+                                decision={decisions[view.finding.finding_id]}
+                                selected={selectedId === view.finding.finding_id}
+                                onSelect={() => selectFinding(view)} />
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </section>
+                  ))}
                 </div>
               )}
               {dismissed.length > 0 && (
