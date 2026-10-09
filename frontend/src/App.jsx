@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { analyzeDocument } from "./api.js";
-import { DEMO_DOCUMENT, DEMO_SOURCE } from "./demo.js";
+import { FLAWED_PRESET, GOOD_PRESET } from "./demo.js";
 import { buildFindingViews, priorityBreakdown, sentenceSeverity, splitByReview } from "./lib.js";
+import { FLAWED_SAMPLE_REPORT, GOOD_SAMPLE_REPORT } from "./sampleReports.js";
 import "./styles.css";
 
 function readTextFile(file, setter) {
@@ -332,6 +333,8 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
+  const [resultMode, setResultMode] = useState(null);
+  const [sampleNotice, setSampleNotice] = useState("");
   const [decisions, setDecisions] = useState({});
   const [selectedId, setSelectedId] = useState(null);
   const [showDismissed, setShowDismissed] = useState(false);
@@ -354,9 +357,11 @@ export default function App() {
   async function run() {
     setLoading(true);
     setError("");
+    setSampleNotice("");
     try {
       const data = await analyzeDocument(documentText, sourceText);
       setResult(data);
+      setResultMode("live");
       setDecisions({});
       setSelectedId(data.ranked_findings[0]?.finding_id || null);
       setShowDismissed(false);
@@ -364,10 +369,36 @@ export default function App() {
       requestAnimationFrame(() => workspaceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
     } catch (e) {
       setResult(null);
+      setResultMode(null);
       setError(e.message);
     } finally {
       setLoading(false);
     }
+  }
+
+  function updateInput(setter, value) {
+    setter(value);
+    if (resultMode === "sample") {
+      setResult(null);
+      setResultMode(null);
+      setDecisions({});
+      setSelectedId(null);
+      setSampleNotice("The sample report was cleared because an input changed. Load a preset report again or run a live analysis.");
+    }
+  }
+
+  function loadSample(preset, report) {
+    setDocumentText(preset.document);
+    setSourceText(preset.source);
+    setResult(report);
+    setResultMode("sample");
+    setSampleNotice("");
+    setError("");
+    setDecisions({});
+    setSelectedId(report.ranked_findings[0]?.finding_id || null);
+    setShowDismissed(false);
+    setShowInputs(false);
+    requestAnimationFrame(() => workspaceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
 
   function decide(id, value) {
@@ -420,21 +451,26 @@ export default function App() {
           )}
           <div className="inputs">
             <InputPanel number="01" title="AI-written document" hint="Paste the document you want to review."
-                        value={documentText} onChange={setDocumentText} />
+                        value={documentText} onChange={(value) => updateInput(setDocumentText, value)} />
             <InputPanel number="02" title="Source material" hint="Paste the trusted material the document should be checked against."
-                        value={sourceText} onChange={setSourceText} />
+                        value={sourceText} onChange={(value) => updateInput(setSourceText, value)} />
           </div>
           <div className="toolbar">
             <button className="primary-button" type="button" onClick={run} disabled={!canRun}>
               {loading ? <><span className="spinner" aria-hidden="true" /> Analyzing…</> : "Analyze document"}
             </button>
             <button className="secondary-button" type="button"
-                    onClick={() => { setDocumentText(DEMO_DOCUMENT); setSourceText(DEMO_SOURCE); }}
-                    disabled={loading}>Load demo</button>
+                    onClick={() => loadSample(GOOD_PRESET, GOOD_SAMPLE_REPORT)}
+                    disabled={loading}>Load good-document sample report</button>
+            <button className="secondary-button" type="button"
+                    onClick={() => loadSample(FLAWED_PRESET, FLAWED_SAMPLE_REPORT)}
+                    disabled={loading}>Load flawed-document sample report</button>
             {loading && <span role="status" className="muted">Checking claims against the source. This can take a few seconds…</span>}
           </div>
         </section>
       )}
+
+      {sampleNotice && <div className="sample-notice" role="status">{sampleNotice}</div>}
 
       {result && !showInputs && (
         <div className="edit-documents">
@@ -447,6 +483,9 @@ export default function App() {
 
       {result && (
         <section className="review-workspace" ref={workspaceRef} aria-label="Document review workspace">
+          <div className={`result-mode ${resultMode === "sample" ? "sample" : "live"}`} role="status">
+            {resultMode === "sample" ? "SAMPLE REPORT — NOT A LIVE ANALYSIS" : "LIVE ANALYSIS"}
+          </div>
           <Summary result={result} reviewedCount={reviewedCount} />
           <div className="workspace-heading">
             <div>

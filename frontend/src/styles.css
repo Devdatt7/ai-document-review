@@ -52,6 +52,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .input-panel textarea::placeholder { color: #8b9690; }
 .input-footnote { display: block; margin-top: 8px; color: #89938d; font-size: 11px; }
 .toolbar { display: flex; align-items: center; gap: 10px; margin: 14px 0 27px; }
+.toolbar .secondary-button { max-width: 100%; }
 .primary-button, .secondary-button { min-height: 39px; padding: 8px 15px; border: 1px solid #cbd5ce; border-radius: 3px; background: white; cursor: pointer; font-size: 13px; font-weight: 650; }
 .primary-button { display: inline-flex; align-items: center; gap: 8px; color: white; background: var(--accent); border-color: var(--accent); }
 .primary-button:hover:not(:disabled) { background: var(--accent-dark); }
@@ -67,7 +68,11 @@ button:disabled { opacity: .54; cursor: not-allowed; }
 .text-button { padding: 5px 0; border: 0; background: transparent; color: var(--accent-dark); font-size: 13px; font-weight: 650; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .text-button:hover { color: #163e32; }
 .error { margin: 0 0 16px; padding: 11px 13px; border: 1px solid #e8aaaa; color: #8f2828; background: #fff7f6; font-size: 13px; }
+.sample-notice { margin: 0 0 16px; padding: 10px 12px; border: 1px solid #d9c28e; color: #66501f; background: #fcf7e9; font-size: 13px; line-height: 1.45; }
 .review-workspace { scroll-margin-top: 16px; }
+.result-mode { margin: 0 0 10px; padding: 10px 12px; border: 1px solid #cbd5ce; font-size: 12px; font-weight: 800; letter-spacing: .06em; }
+.result-mode.sample { border-color: #d9b969; color: #654a13; background: #fbf3dd; }
+.result-mode.live { border-color: #9ebcab; color: #20553e; background: #edf5ef; }
 .summary { margin-bottom: 26px; background: var(--paper); border: 1px solid var(--line); border-top: 3px solid #aab6af; }
 .summary.status-BLOCKED { border-top-color: var(--blocked); }
 .summary.status-REVIEW { border-top-color: var(--review); }
@@ -224,6 +229,7 @@ button:disabled { opacity: .54; cursor: not-allowed; }
   .input-panel { padding: 14px; }
   .input-panel textarea { min-height: 160px; }
   .toolbar { flex-wrap: wrap; margin-bottom: 21px; }
+  .toolbar > button { flex: 1 1 auto; }
   .toolbar .muted { flex-basis: 100%; }
   .summary-top { grid-template-columns: 1fr 1fr; }
   .status-block, .summary-metric { padding: 11px 12px; }

@@ -29,6 +29,13 @@ cd frontend
 npm run dev
 ```
 
+## Offline demonstration
+
+The frontend provides good-document and flawed-document sample reports. They are clearly marked
+as sample reports and do not call the backend or Gemini. Editing either input clears the loaded
+sample report; **Analyze document** remains the separate live-analysis workflow. The presets and
+refund policy source are synthetic demonstration text.
+
 ## Gemini usage limits
 
 The free-tier limit is set by Google for the selected model and plan; the app cannot increase it.
