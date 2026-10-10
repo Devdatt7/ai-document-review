@@ -50,7 +50,7 @@ const result = {
 test("analysis sends the request and clears its timeout on success", async (t) => {
   let cleared = false;
   t.mock.method(globalThis, "setTimeout", (callback, delay) => {
-    assert.equal(delay, 120_000);
+    assert.equal(delay, 60_000);
     assert.equal(delay, ANALYSIS_TIMEOUT_MS);
     return 42;
   });
@@ -81,7 +81,7 @@ for (const phase of ["connection", "body"]) {
       });
       return phase === "connection" ? stalled() : Promise.resolve({ ok: true, json: stalled });
     });
-    await assert.rejects(analyzeDocument("doc", "source"), /timed out after 2 minutes/);
+    await assert.rejects(analyzeDocument("doc", "source"), /timed out after 1 minute/);
     assert.equal(cleared, true);
   });
 }

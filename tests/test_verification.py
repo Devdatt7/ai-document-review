@@ -260,8 +260,9 @@ def _batch_answer(claim, evidence, verdict=V.SUPPORTED):
     }
 
 
-def test_eight_semantic_claims_use_two_batch_requests(monkeypatch):
-    claims, evidence = _batch_claims(8)
+@pytest.mark.parametrize("count, expected_calls", [(8, 1), (12, 1), (24, 2), (25, 3)])
+def test_semantic_claims_use_larger_batches_without_losing_results(monkeypatch, count, expected_calls):
+    claims, evidence = _batch_claims(count)
     calls = []
 
     def fake_batch(prompt, schema):
@@ -275,9 +276,37 @@ def test_eight_semantic_claims_use_two_batch_requests(monkeypatch):
     monkeypatch.setattr(verify, "ask_llm_json", fake_batch)
     results = verify.verify_claims(claims, evidence)
 
-    assert len(calls) == 2
-    assert len(results) == 8
+    assert len(calls) == expected_calls
+    assert len(results) == count
     assert [result.claim_id for result in results] == [claim.claim_id for claim in claims]
+    assert all(result.verdict == V.SUPPORTED for result in results)
+
+
+def test_twelve_claims_finish_within_budget_with_simulated_provider_latency(monkeypatch):
+    import llm
+
+    claims, evidence = _batch_claims(12)
+    clock = [0.0]
+    monkeypatch.setattr(llm, "monotonic", lambda: clock[0])
+    calls = []
+
+    def fake_batch(prompt, schema):
+        calls.append(prompt)
+        clock[0] += 20
+        return schema(results=[
+            _batch_answer(claim, evidence[index])
+            for index, claim in enumerate(claims)
+            if claim.claim_text in prompt
+        ])
+
+    monkeypatch.setattr(verify, "ask_llm_json", fake_batch)
+    with llm.analysis_time_budget():
+        clock[0] += 10  # Simulated extraction time.
+        results = verify.verify_claims(claims, evidence)
+    assert clock[0] == 30
+    assert clock[0] < 55
+    assert len(calls) == 1
+    assert len(results) == 12
     assert all(result.verdict == V.SUPPORTED for result in results)
 
 

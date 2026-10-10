@@ -16,7 +16,7 @@ from models import Claim, EvidenceChunk, EvidenceResult, VerificationResult, Ver
 from retrieval import tokenize
 
 V = VerificationVerdict
-VERIFY_BATCH_SIZE = 4
+VERIFY_BATCH_SIZE = 12
 
 
 # ---------- Step 2: simple numeric / date rules ----------
