@@ -598,13 +598,13 @@ def test_analysis_budget_limits_request_timeout_and_resets(monkeypatch):
     monkeypatch.setattr(llm, "monotonic", lambda: clock[0])
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "60")
     with llm.analysis_time_budget():
-        assert llm._request_timeout() == 55
-        clock[0] += 45
+        assert llm._request_timeout() == 60
+        clock[0] += 285
         assert llm._request_timeout() == 10
         clock[0] += 10
-        with pytest.raises(llm.LLMTimeoutError, match="55-second"):
+        with pytest.raises(llm.LLMTimeoutError, match="295-second"):
             llm._request_timeout()
-        clock[0] = 150
+        clock[0] = 390
     assert llm._analysis_deadline.get() is None
     assert llm._request_timeout() == 60
 
@@ -615,7 +615,7 @@ def test_expired_budget_does_not_call_another_provider(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
     def limited(prompt, **config):
-        clock[0] = 55
+        clock[0] = 295
         raise llm.LLMRateLimitError("quota")
 
     def unexpected(prompt, **config):
@@ -634,7 +634,7 @@ def test_slow_answer_is_not_returned_as_completed_report(monkeypatch):
     monkeypatch.setattr(llm, "monotonic", lambda: clock[0])
 
     def slow(prompt, **config):
-        clock[0] = 56
+        clock[0] = 296
         return "late answer"
 
     monkeypatch.setattr(llm, "_generate", slow)
@@ -658,9 +658,23 @@ def test_gemini_request_has_remaining_timeout_and_no_sdk_retry(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
     monkeypatch.setattr(llm, "_client_for", lambda key: type("C", (), {"models": Models()})())
     with llm.analysis_time_budget():
-        clock[0] = 50
+        clock[0] = 290
         assert llm.ask_llm("hi") == "ok"
     assert calls == [(5000, 1)]
+
+
+def test_analysis_can_complete_after_one_minute(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(llm, "monotonic", lambda: clock[0])
+
+    def answer(prompt, **config):
+        clock[0] = 240
+        return "completed answer"
+
+    monkeypatch.setattr(llm, "_generate", answer)
+    with llm.analysis_time_budget():
+        assert llm.ask_llm("hi") == "completed answer"
+    assert llm._analysis_deadline.get() is None
 
 
 # Live test: calls the real Gemini API only after explicit opt-in.

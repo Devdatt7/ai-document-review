@@ -304,7 +304,7 @@ def test_twelve_claims_finish_within_budget_with_simulated_provider_latency(monk
         clock[0] += 10  # Simulated extraction time.
         results = verify.verify_claims(claims, evidence)
     assert clock[0] == 30
-    assert clock[0] < 55
+    assert clock[0] < llm.ANALYSIS_TIMEOUT_SECONDS
     assert len(calls) == 1
     assert len(results) == 12
     assert all(result.verdict == V.SUPPORTED for result in results)

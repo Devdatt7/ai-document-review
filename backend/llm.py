@@ -25,7 +25,7 @@ DEFAULT_MODEL = "gemini-3.7-flash"
 DEFAULT_FALLBACK_MODELS = "gemini-3.7-flash-lite"
 DEFAULT_TIMEOUT_SECONDS = 60
 TEMPERATURE = 0
-ANALYSIS_TIMEOUT_SECONDS = 55
+ANALYSIS_TIMEOUT_SECONDS = 295
 _analysis_deadline: ContextVar[float | None] = ContextVar("analysis_deadline", default=None)
 
 T = TypeVar("T", bound=BaseModel)
@@ -51,7 +51,7 @@ def check_analysis_deadline() -> None:
     deadline = _analysis_deadline.get()
     if deadline is not None and monotonic() >= deadline:
         raise LLMTimeoutError(
-            "Analysis exceeded its 55-second time budget. No completed report was produced. "
+            "Analysis exceeded its 295-second time budget. No completed report was produced. "
             "Try a shorter document or a specific faster free model."
         )
 

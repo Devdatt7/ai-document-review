@@ -153,19 +153,21 @@ four-claim batches. The same ID, citation, and exact-quote checks still apply.
 Multiple slow calls and format-repair attempts can add up; free-model routing
 also has variable latency. There is no guaranteed "few seconds" completion time.
 
-The `/analyze` endpoint shares a 55-second budget across extraction,
+The `/analyze` endpoint shares a 295-second budget across extraction,
 verification, repairs, and provider fallbacks. Each outgoing request is limited
 to the remaining budget or `LLM_TIMEOUT_SECONDS` (default: 60), whichever is
 smaller. Gemini SDK retries are disabled because the app already handles fallback.
 Expired budgets stop further calls and return HTTP 504, not a partial success.
 HTTP timeouts depend on network phases, so this is not a hard process-kill deadline.
 
-The browser aborts waiting after 60 seconds, including while reading the response,
+The browser aborts waiting after 300 seconds (5 minutes), including while reading the response,
 clears the spinner, and shows a timeout error. Browser cancellation does not
 guarantee immediate cancellation of an already-running backend request.
 Try a shorter document or choose an available faster `:free` OpenRouter model.
-This is a one-minute limit on browser waiting, not a guarantee that a free AI
-provider will produce a complete report within one minute.
+This is a five-minute limit on browser waiting, not a minimum runtime or a guarantee
+that a free AI provider will produce a complete report within five minutes.
+Individual provider requests still default to a 60-second timeout; the longer
+budget lets multiple extraction, verification, and repair calls complete.
 Push these changes and redeploy both Render and Vercel to apply the limits.
 
 ## Test

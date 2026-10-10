@@ -8,7 +8,7 @@ export const API_URL = (
     : "http://localhost:8000")
 ).replace(/\/+$/, "");
 
-export const ANALYSIS_TIMEOUT_MS = 60_000;
+export const ANALYSIS_TIMEOUT_MS = 300_000;
 
 export async function analyzeDocument(documentText, sourceText) {
   const controller = new AbortController();
@@ -35,7 +35,7 @@ export async function analyzeDocument(documentText, sourceText) {
   } catch (error) {
     if (controller.signal.aborted) {
       throw new Error(
-        "Analysis timed out after 1 minute. No completed report was received. " +
+        "Analysis timed out after 5 minutes. No completed report was received. " +
         "Try a shorter document or check the backend logs before retrying."
       );
     }
