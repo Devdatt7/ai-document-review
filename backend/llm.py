@@ -7,6 +7,7 @@ Privacy: never log or print prompts, responses or the API key.
 import json
 import os
 from functools import lru_cache
+from pathlib import Path
 from typing import TypeVar
 
 import httpx
@@ -15,7 +16,7 @@ from google import genai
 from google.genai import errors, types
 from pydantic import BaseModel, ValidationError
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 DEFAULT_MODEL = "gemini-3.7-flash"
 DEFAULT_FALLBACK_MODELS = "gemini-3.7-flash-lite"
@@ -135,6 +136,12 @@ def _generate_gemini(prompt: str, **config) -> str:
 
 XAI_URL = "https://api.x.ai/v1/chat/completions"
 DEFAULT_XAI_MODEL = "grok-3-mini"
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_OPENROUTER_MODEL = "openrouter/free"
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
 
 def _xai_key() -> str:
@@ -143,8 +150,37 @@ def _xai_key() -> str:
 
 def _generate_xai(prompt: str, **config) -> str:
     """Backup provider (xAI Grok, OpenAI-compatible API). Used only after Gemini is unavailable."""
+    return _generate_chat(
+        prompt, "xAI", XAI_URL, _xai_key(),
+        os.getenv("XAI_MODEL") or DEFAULT_XAI_MODEL, **config
+    )
+
+
+def _generate_openai(prompt: str, **config) -> str:
+    return _generate_chat(
+        prompt, "OpenAI", OPENAI_URL, os.getenv("OPENAI_API_KEY", "").strip(),
+        os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL, **config
+    )
+
+
+def _generate_openrouter(prompt: str, **config) -> str:
+    model = (os.getenv("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL).strip()
+    if model != DEFAULT_OPENROUTER_MODEL and not model.endswith(":free"):
+        raise LLMError(
+            "OPENROUTER_MODEL must be 'openrouter/free' or a model ID ending in ':free'. "
+            "Paid OpenRouter models are not enabled."
+        )
+    return _generate_chat(
+        prompt, "OpenRouter", OPENROUTER_URL,
+        os.getenv("OPENROUTER_API_KEY", "").strip(), model, **config
+    )
+
+
+def _generate_chat(
+    prompt: str, provider: str, url: str, api_key: str, model: str, **config
+) -> str:
     content = prompt
-    body: dict = {"model": os.getenv("XAI_MODEL") or DEFAULT_XAI_MODEL, "temperature": TEMPERATURE}
+    body: dict = {"model": model, "temperature": TEMPERATURE}
     schema = config.get("response_schema")
     if schema is not None:
         body["response_format"] = {"type": "json_object"}
@@ -153,41 +189,131 @@ def _generate_xai(prompt: str, **config) -> str:
             f"{json.dumps(schema.model_json_schema())}"
         )
     body["messages"] = [{"role": "user", "content": content}]
+    if provider == "OpenRouter":
+        body["provider"] = {"require_parameters": True}
     timeout = int(os.getenv("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
     try:
         response = httpx.post(
-            XAI_URL, json=body, timeout=timeout, headers={"Authorization": f"Bearer {_xai_key()}"}
+            url, json=body, timeout=timeout, headers={"Authorization": "Bearer " + api_key}
         )
     except httpx.TimeoutException:
-        raise LLMError("The backup provider (xAI) took too long to answer. Try again.") from None
+        raise LLMError(f"The backup provider ({provider}) took too long to answer. Try again.") from None
     except httpx.RequestError:
-        raise LLMError("Could not reach the backup provider (xAI). Check your internet connection.") from None
+        raise LLMError(f"Could not reach the backup provider ({provider}). Check your internet connection.") from None
     if response.status_code == 429:
-        raise LLMRateLimitError("The xAI backup key has also reached its rate or usage limit.")
+        raise LLMRateLimitError(f"The {provider} backup key has also reached its rate or usage limit.")
     if response.status_code != 200:
         raise LLMError(
-            f"xAI rejected the request (HTTP {response.status_code}). Check XAI_API_KEY and XAI_MODEL in .env."
+            f"{provider} rejected the request (HTTP {response.status_code}). "
+            f"Check {provider.upper()}_API_KEY and {provider.upper()}_MODEL in the backend environment."
         )
     try:
-        text = response.json()["choices"][0]["message"]["content"]
+        payload = response.json()
+        choice = payload["choices"][0]
+        text = choice["message"]["content"]
     except (ValueError, KeyError, IndexError, TypeError):
-        text = ""
-    if not text:
-        raise LLMError("xAI returned an empty answer. Try again.")
+        raise LLMOutputError(f"{provider} returned an invalid response. Try again.") from None
+    if provider == "OpenRouter" and choice.get("finish_reason") != "stop":
+        raise LLMOutputError("OpenRouter returned an incomplete or blocked answer. Try again.")
+    if not isinstance(text, str) or not text.strip():
+        raise LLMOutputError(f"{provider} returned an empty or invalid answer. Try again.")
     return text
 
 
+def _generate_anthropic(prompt: str, **config) -> str:
+    body: dict = {
+        "model": os.getenv("ANTHROPIC_MODEL") or DEFAULT_ANTHROPIC_MODEL,
+        "max_tokens": 8192,
+        "temperature": TEMPERATURE,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    schema = config.get("response_schema")
+    if schema is not None:
+        # A forced tool supplies structured data; no external tool is executed.
+        body["tools"] = [{
+            "name": "review_result",
+            "description": "Return the requested result matching the provided schema.",
+            "input_schema": schema.model_json_schema(),
+        }]
+        body["tool_choice"] = {"type": "tool", "name": "review_result"}
+    try:
+        response = httpx.post(
+            ANTHROPIC_URL, json=body,
+            timeout=int(os.getenv("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)),
+            headers={
+                "x-api-key": os.getenv("ANTHROPIC_API_KEY", "").strip(),
+                "anthropic-version": "2023-06-01",
+            },
+        )
+    except httpx.TimeoutException:
+        raise LLMError("Claude took too long to answer. Try again.") from None
+    except httpx.RequestError:
+        raise LLMError("Could not reach Claude. Check your internet connection.") from None
+    if response.status_code == 429:
+        raise LLMRateLimitError("Claude has reached its rate or usage limit.")
+    if response.status_code != 200:
+        raise LLMError(
+            f"Claude rejected the request (HTTP {response.status_code}). "
+            "Check ANTHROPIC_API_KEY and ANTHROPIC_MODEL in the backend environment."
+        )
+    try:
+        payload = response.json()
+        stop_reason = payload["stop_reason"]
+        blocks = payload["content"]
+    except (ValueError, KeyError, TypeError):
+        raise LLMOutputError("Claude returned an invalid response. Try again.") from None
+    if stop_reason == "max_tokens":
+        raise LLMOutputError("Claude's answer exceeded the output token limit. Use a shorter document.")
+    if not isinstance(blocks, list) or not all(isinstance(block, dict) for block in blocks):
+        raise LLMOutputError("Claude returned invalid content blocks. Try again.")
+    if schema is not None:
+        results = [
+            block.get("input") for block in blocks
+            if block.get("type") == "tool_use" and block.get("name") == "review_result"
+        ]
+        if stop_reason != "tool_use" or len(results) != 1 or not isinstance(results[0], dict):
+            raise LLMOutputError("Claude did not return the expected structured result. Try again.")
+        return json.dumps(results[0])
+    texts = [block.get("text") for block in blocks if block.get("type") == "text"]
+    if stop_reason != "end_turn" or not texts or not all(
+        isinstance(text, str) and text.strip() for text in texts
+    ):
+        raise LLMOutputError("Claude returned an empty or invalid answer. Try again.")
+    return "\n".join(texts)
+
+
 def _generate(prompt: str, **config) -> str:
-    """Gemini first (all keys); xAI only if Gemini is rate limited or has no key configured."""
+    """Gemini, then configured backups; advance only for missing keys or rate limits."""
+    backups = [
+        generate for key, generate in [
+            ("OPENROUTER_API_KEY", _generate_openrouter),
+            ("XAI_API_KEY", _generate_xai),
+            ("OPENAI_API_KEY", _generate_openai),
+            ("ANTHROPIC_API_KEY", _generate_anthropic),
+        ] if os.getenv(key, "").strip()
+    ]
+    if not backups and not _gemini_configured():
+        raise LLMError(
+            "No AI provider key is configured in the backend. For free OpenRouter analysis, "
+            "set OPENROUTER_API_KEY and OPENROUTER_MODEL=openrouter/free in Render's backend "
+            "Environment settings, then redeploy. Locally, use the repository-root .env "
+            "and restart the backend. Frontend .env.local does not configure the backend."
+        )
     try:
         return _generate_gemini(prompt, **config)
     except LLMRateLimitError:
-        if not _xai_key():
+        if not backups:
             raise
     except LLMError:
-        if not _xai_key() or _gemini_configured():
+        if _gemini_configured() or not backups:
             raise
-    return _generate_xai(prompt, **config)
+    for index, generate in enumerate(backups):
+        try:
+            return generate(prompt, **config)
+        except LLMRateLimitError:
+            if index == len(backups) - 1:
+                raise
+    raise AssertionError("Configured backup providers were not attempted")
 
 
 def _gemini_configured() -> bool:
@@ -208,5 +334,5 @@ def ask_llm_json(prompt: str, schema: type[T]) -> T:
         return schema.model_validate_json(text)
     except ValidationError:
         raise LLMOutputError(
-            "Gemini answered, but not in the expected JSON format. Try again."
+            "The AI provider answered, but not in the expected JSON format. Try again."
         ) from None

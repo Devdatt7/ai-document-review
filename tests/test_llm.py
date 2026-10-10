@@ -32,13 +32,31 @@ def test_live_gemini_allows_explicit_opt_in_and_key(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_backup_provider(monkeypatch):
     monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
 
 def test_missing_api_key_gives_clear_error(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
-    with pytest.raises(llm.LLMError, match="No Gemini key found"):
+    with pytest.raises(llm.LLMError, match="No AI provider key is configured in the backend"):
         llm.ask_llm("hi")
+
+
+def test_missing_provider_error_explains_openrouter_setup_without_request(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Missing credentials must not send an API request")
+
+    monkeypatch.setattr(llm.httpx, "post", unexpected)
+    with pytest.raises(llm.LLMError) as error:
+        llm.ask_llm("hi")
+    assert "OPENROUTER_API_KEY" in str(error.value)
+    assert "Render" in str(error.value)
+    assert "Frontend .env.local does not configure the backend" in str(error.value)
 
 
 def _fake_client_factory(calls, exhausted):
@@ -141,6 +159,135 @@ def test_xai_rate_limit_raises_rate_limit_error(monkeypatch):
         llm.ask_llm("hi")
 
 
+def test_openai_json_mode_parses_and_validates(monkeypatch):
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        n: int
+
+    def fake_post(url, json, timeout, headers):
+        assert url == llm.OPENAI_URL
+        assert headers == {"Authorization": "Bearer openai-test"}
+        assert timeout == 12
+        assert json["model"] == "custom-model"
+        assert json["response_format"] == {"type": "json_object"}
+        assert '"n"' in json["messages"][0]["content"]
+        return llm.httpx.Response(
+            200, json={"choices": [{"message": {"content": '{"n": 3}'}}]}
+        )
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", " openai-test ")
+    monkeypatch.setenv("OPENAI_MODEL", "custom-model")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "12")
+    monkeypatch.setattr(llm.httpx, "post", fake_post)
+    assert llm.ask_llm_json("x", Out).n == 3
+
+
+def test_openai_after_gemini_rate_limit(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "a")
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
+    monkeypatch.setattr(llm, "_client_for", _fake_client_factory([], {"a"}))
+    monkeypatch.setattr(llm, "_active_key", 0)
+    monkeypatch.setattr(llm, "_generate_openai", lambda prompt, **kw: "from-openai")
+    assert llm.ask_llm("hi") == "from-openai"
+
+
+@pytest.mark.parametrize("xai_limited", [False, True])
+def test_xai_precedes_openai(monkeypatch, xai_limited):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setenv("XAI_API_KEY", "xai-test")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
+    calls = []
+
+    def xai(prompt, **config):
+        calls.append("xai")
+        if xai_limited:
+            raise llm.LLMRateLimitError("xai limited")
+        return "from-xai"
+
+    def openai(prompt, **config):
+        calls.append("openai")
+        return "from-openai"
+
+    monkeypatch.setattr(llm, "_generate_xai", xai)
+    monkeypatch.setattr(llm, "_generate_openai", openai)
+    assert llm.ask_llm("hi") == ("from-openai" if xai_limited else "from-xai")
+    assert calls == (["xai", "openai"] if xai_limited else ["xai"])
+
+
+@pytest.mark.parametrize("provider", ["gemini", "xai"])
+def test_openai_does_not_hide_non_quota_errors(monkeypatch, provider):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setenv("XAI_API_KEY", "xai-test")
+
+    def fail(prompt, **config):
+        raise llm.LLMError("invalid credentials")
+
+    def unexpected(prompt, **config):
+        pytest.fail("OpenAI must not be called for non-quota errors")
+
+    if provider == "xai":
+        monkeypatch.delenv("GEMINI_API_KEY")
+    monkeypatch.setattr(llm, f"_generate_{provider}", fail)
+    monkeypatch.setattr(llm, "_generate_openai", unexpected)
+    with pytest.raises(llm.LLMError, match="invalid credentials"):
+        llm.ask_llm("hi")
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500])
+def test_openai_http_errors_are_explicit(monkeypatch, status):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
+    monkeypatch.setattr(llm.httpx, "post", lambda *a, **k: llm.httpx.Response(status))
+    error_type = llm.LLMRateLimitError if status == 429 else llm.LLMError
+    with pytest.raises(error_type, match="OpenAI"):
+        llm._generate_openai("hi")
+
+
+@pytest.mark.parametrize("error", [llm.httpx.ReadTimeout, llm.httpx.ConnectError])
+def test_openai_network_errors_are_explicit(monkeypatch, error):
+    def fail(*args, **kwargs):
+        raise error("network failed")
+
+    monkeypatch.setattr(llm.httpx, "post", fail)
+    with pytest.raises(llm.LLMError, match="OpenAI"):
+        llm._generate_openai("hi")
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"choices": []},
+    {"choices": [{"message": {"content": None}}]},
+    {"choices": [{"message": {"content": ["not text"]}}]},
+    {"choices": [{"message": {"content": " "}}]},
+])
+def test_openai_invalid_responses_are_explicit(monkeypatch, payload):
+    monkeypatch.setattr(
+        llm.httpx, "post", lambda *a, **k: llm.httpx.Response(200, json=payload)
+    )
+    with pytest.raises(llm.LLMOutputError, match="OpenAI"):
+        llm._generate_openai("hi")
+
+
+def test_openai_text_uses_default_model(monkeypatch):
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    def fake_post(url, json, **kwargs):
+        assert json["model"] == llm.DEFAULT_OPENAI_MODEL
+        assert json["messages"] == [{"role": "user", "content": "hi"}]
+        assert "response_format" not in json
+        return llm.httpx.Response(
+            200, json={"choices": [{"message": {"content": "hello"}}]}
+        )
+
+    monkeypatch.setattr(llm.httpx, "post", fake_post)
+    assert llm._generate_openai("hi") == "hello"
+
+
 def test_invalid_json_gives_clear_error(monkeypatch):
     from pydantic import BaseModel
 
@@ -160,6 +307,290 @@ def test_json_is_validated(monkeypatch):
 
     monkeypatch.setattr(llm, "_generate", lambda prompt, **kw: '{"n": 3}')
     assert llm.ask_llm_json("x", Out).n == 3
+
+
+def test_claude_structured_result_and_request(monkeypatch):
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        n: int
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", " claude-test ")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "custom-claude")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "12")
+
+    def post(url, json, timeout, headers):
+        assert url == llm.ANTHROPIC_URL
+        assert headers["x-api-key"] == "claude-test"
+        assert headers["anthropic-version"] == "2023-06-01"
+        assert timeout == 12
+        assert json["model"] == "custom-claude"
+        assert json["max_tokens"] == 8192
+        assert json["messages"] == [{"role": "user", "content": "x"}]
+        assert json["tools"][0]["input_schema"] == Out.model_json_schema()
+        assert json["tool_choice"] == {"type": "tool", "name": "review_result"}
+        return llm.httpx.Response(200, json={
+            "stop_reason": "tool_use",
+            "content": [{"type": "tool_use", "name": "review_result", "input": {"n": 3}}],
+        })
+
+    monkeypatch.setattr(llm.httpx, "post", post)
+    assert llm.ask_llm_json("x", Out).n == 3
+
+
+def test_claude_plain_text_default_model(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+
+    def post(url, json, **kwargs):
+        assert json["model"] == llm.DEFAULT_ANTHROPIC_MODEL
+        assert "tools" not in json
+        return llm.httpx.Response(200, json={
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hello"}, {"type": "text", "text": "world"}],
+        })
+
+    monkeypatch.setattr(llm.httpx, "post", post)
+    assert llm._generate_anthropic("hi") == "hello\nworld"
+
+
+@pytest.mark.parametrize("successful_provider", ["gemini", "xai", "openai", "anthropic"])
+def test_claude_fallback_order(monkeypatch, successful_provider):
+    for key in ["GEMINI_API_KEY", "XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]:
+        monkeypatch.setenv(key, "test-key")
+    calls = []
+
+    def generate(provider):
+        def call(prompt, **config):
+            calls.append(provider)
+            if provider != successful_provider:
+                raise llm.LLMRateLimitError("limited")
+            return provider
+        return call
+
+    order = ["gemini", "xai", "openai", "anthropic"]
+    for provider in order:
+        monkeypatch.setattr(llm, f"_generate_{provider}", generate(provider))
+    assert llm.ask_llm("hi") == successful_provider
+    assert calls == order[:order.index(successful_provider) + 1]
+
+
+@pytest.mark.parametrize("provider", ["gemini", "xai", "openai"])
+def test_claude_does_not_hide_other_provider_errors(monkeypatch, provider):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setenv(f"{provider.upper()}_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "claude-test")
+
+    def fail(prompt, **config):
+        raise llm.LLMError("invalid credentials")
+
+    def unexpected(prompt, **config):
+        pytest.fail("Claude must not be called for non-quota errors")
+
+    monkeypatch.setattr(llm, f"_generate_{provider}", fail)
+    monkeypatch.setattr(llm, "_generate_anthropic", unexpected)
+    with pytest.raises(llm.LLMError, match="invalid credentials"):
+        llm.ask_llm("hi")
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500, 529])
+def test_claude_http_errors(monkeypatch, status):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "claude-test")
+    monkeypatch.setattr(llm.httpx, "post", lambda *a, **kw: llm.httpx.Response(status))
+    error_type = llm.LLMRateLimitError if status == 429 else llm.LLMError
+    with pytest.raises(error_type, match="Claude"):
+        llm.ask_llm("hi")
+
+
+@pytest.mark.parametrize("error", [llm.httpx.ReadTimeout, llm.httpx.ConnectError])
+def test_claude_network_errors(monkeypatch, error):
+    def fail(*a, **kw):
+        raise error("network error")
+
+    monkeypatch.setattr(llm.httpx, "post", fail)
+    with pytest.raises(llm.LLMError, match="Claude"):
+        llm._generate_anthropic("hi")
+
+
+@pytest.mark.parametrize("payload", [
+    {}, [], {"stop_reason": "end_turn", "content": []},
+    {"stop_reason": "end_turn", "content": ["bad block"]},
+    {"stop_reason": "end_turn", "content": [{"type": "text", "text": None}]},
+    {"stop_reason": "end_turn", "content": [{"type": "text", "text": " "}]},
+    {"stop_reason": "max_tokens", "content": [{"type": "text", "text": "partial"}]},
+    {"stop_reason": "refusal", "content": [{"type": "text", "text": "refused"}]},
+])
+def test_claude_invalid_text_responses(monkeypatch, payload):
+    monkeypatch.setattr(llm.httpx, "post", lambda *a, **kw: llm.httpx.Response(200, json=payload))
+    with pytest.raises(llm.LLMOutputError, match="Claude"):
+        llm._generate_anthropic("hi")
+
+
+@pytest.mark.parametrize("blocks", [
+    [], [{"type": "text", "text": '{"n": 3}'}],
+    [{"type": "tool_use", "name": "wrong", "input": {"n": 3}}],
+    [{"type": "tool_use", "name": "review_result", "input": None}],
+    [{"type": "tool_use", "name": "review_result", "input": {"n": "not an int"}}],
+    [{"type": "tool_use", "name": "review_result", "input": {"n": 3}}] * 2,
+])
+def test_claude_invalid_structured_responses(monkeypatch, blocks):
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        n: int
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "claude-test")
+    monkeypatch.setattr(llm.httpx, "post", lambda *a, **kw: llm.httpx.Response(
+        200, json={"stop_reason": "tool_use", "content": blocks}
+    ))
+    with pytest.raises(llm.LLMOutputError):
+        llm.ask_llm_json("x", Out)
+
+
+def test_claude_non_json_response(monkeypatch):
+    monkeypatch.setattr(
+        llm.httpx, "post", lambda *a, **kw: llm.httpx.Response(200, text="not JSON")
+    )
+    with pytest.raises(llm.LLMOutputError, match="Claude"):
+        llm._generate_anthropic("hi")
+
+
+@pytest.mark.parametrize("model", ["openrouter/free", "example/model:free"])
+def test_openrouter_json_request_and_validation(monkeypatch, model):
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        n: int
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", " router-test ")
+    monkeypatch.setenv("OPENROUTER_MODEL", model)
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "12")
+
+    def post(url, json, timeout, headers):
+        assert url == llm.OPENROUTER_URL
+        assert headers["Authorization"] == "Bearer router-test"
+        assert timeout == 12
+        assert json["model"] == model
+        assert json["provider"] == {"require_parameters": True}
+        assert json["response_format"] == {"type": "json_object"}
+        assert '"n"' in json["messages"][0]["content"]
+        assert "models" not in json
+        return llm.httpx.Response(200, json={
+            "choices": [{"finish_reason": "stop", "message": {"content": '{"n": 3}'}}],
+        })
+
+    monkeypatch.setattr(llm.httpx, "post", post)
+    assert llm.ask_llm_json("x", Out).n == 3
+
+
+@pytest.mark.parametrize("model", ["openrouter/auto", "openai/gpt-4o", "model:free:paid"])
+def test_openrouter_rejects_paid_models_before_request(monkeypatch, model):
+    monkeypatch.setenv("OPENROUTER_MODEL", model)
+
+    def unexpected(*a, **kw):
+        pytest.fail("A paid model must not cause an HTTP request")
+
+    monkeypatch.setattr(llm.httpx, "post", unexpected)
+    with pytest.raises(llm.LLMError, match="Paid OpenRouter models are not enabled"):
+        llm._generate_openrouter("hi")
+
+
+def test_openrouter_free_default_plain_text(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+
+    def post(url, json, **kwargs):
+        assert json["model"] == "openrouter/free"
+        assert json["messages"] == [{"role": "user", "content": "hi"}]
+        assert "response_format" not in json
+        return llm.httpx.Response(200, json={
+            "choices": [{"finish_reason": "stop", "message": {"content": "hello"}}],
+        })
+
+    monkeypatch.setattr(llm.httpx, "post", post)
+    assert llm._generate_openrouter("hi") == "hello"
+
+
+@pytest.mark.parametrize("successful", ["gemini", "openrouter", "xai", "openai", "anthropic"])
+def test_free_backup_precedes_paid_providers(monkeypatch, successful):
+    order = ["gemini", "openrouter", "xai", "openai", "anthropic"]
+    calls = []
+
+    def generate(provider):
+        def call(prompt, **config):
+            calls.append(provider)
+            if provider != successful:
+                raise llm.LLMRateLimitError("limited")
+            return provider
+        return call
+
+    for provider in order:
+        monkeypatch.setenv(f"{provider.upper()}_API_KEY", "test-key")
+        monkeypatch.setattr(llm, f"_generate_{provider}", generate(provider))
+    assert llm.ask_llm("hi") == successful
+    assert calls == order[:order.index(successful) + 1]
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 429, 500, 502])
+def test_openrouter_errors_do_not_hide_failures(monkeypatch, status):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(llm.httpx, "post", lambda *a, **kw: llm.httpx.Response(status))
+    error = llm.LLMRateLimitError if status == 429 else llm.LLMError
+    with pytest.raises(error, match="OpenRouter"):
+        llm.ask_llm("hi")
+
+
+def test_openrouter_non_quota_error_does_not_call_paid_backup(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def unexpected(*a, **kw):
+        pytest.fail("Paid fallback must not hide a non-quota error")
+
+    monkeypatch.setattr(llm.httpx, "post", lambda *a, **kw: llm.httpx.Response(401))
+    monkeypatch.setattr(llm, "_generate_openai", unexpected)
+    with pytest.raises(llm.LLMError, match="OpenRouter"):
+        llm.ask_llm("hi")
+
+
+@pytest.mark.parametrize("reason", ["length", "content_filter", "error", None])
+def test_openrouter_incomplete_answers_are_rejected(monkeypatch, reason):
+    monkeypatch.setattr(llm.httpx, "post", lambda *a, **kw: llm.httpx.Response(200, json={
+        "choices": [{"finish_reason": reason, "message": {"content": "partial"}}],
+    }))
+    with pytest.raises(llm.LLMOutputError, match="OpenRouter"):
+        llm._generate_openrouter("hi")
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"error": {"code": 502}}, {"choices": []},
+    {"choices": [{"finish_reason": "stop", "message": {"content": None}}]},
+])
+def test_openrouter_invalid_responses_are_rejected(monkeypatch, payload):
+    monkeypatch.setattr(llm.httpx, "post", lambda *a, **kw: llm.httpx.Response(200, json=payload))
+    with pytest.raises(llm.LLMOutputError, match="OpenRouter"):
+        llm._generate_openrouter("hi")
+
+
+@pytest.mark.parametrize("error", [llm.httpx.ReadTimeout, llm.httpx.ConnectError])
+def test_openrouter_network_errors(monkeypatch, error):
+    def fail(*a, **kw):
+        raise error("network failed")
+
+    monkeypatch.setattr(llm.httpx, "post", fail)
+    with pytest.raises(llm.LLMError, match="OpenRouter"):
+        llm._generate_openrouter("hi")
 
 
 # Live test: calls the real Gemini API only after explicit opt-in.

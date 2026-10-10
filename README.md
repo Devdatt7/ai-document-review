@@ -82,6 +82,69 @@ evidence and numeric/date contradictions skip verification. A malformed response
 format-repair request per batch; quota/rate-limit errors are not retried. If a quota error appears,
 check usage and reset timing in Google AI Studio.
 
+## OpenAI backup
+
+To enable OpenAI, set `OPENAI_API_KEY` in the backend `.env` for local development,
+or in Render's Environment settings for deployment. Optionally set `OPENAI_MODEL`
+(default: `gpt-4o-mini`). Restart or redeploy the backend after changing settings.
+The existing `httpx` dependency is used; no additional package is needed.
+
+Requests try Gemini first, then OpenRouter free, xAI, OpenAI, and Claude if configured.
+The next provider is used only when the preceding provider has no key or reaches
+its rate/usage limit. Invalid credentials, timeouts, and other errors remain
+visible instead of silently switching providers. OpenAI can also work alone
+when Gemini and xAI keys are unset. Structured answers are validated against the
+same Pydantic schemas as Gemini.
+
+Enabling a backup permits sending the document and evidence to that provider.
+OpenAI API usage may incur charges and requires an API account with available
+quota/billing; a ChatGPT subscription does not supply API credits. Never add
+`OPENAI_API_KEY` to Vercel frontend variables, browser code, or Git.
+
+## Anthropic Claude backup
+
+Set `ANTHROPIC_API_KEY` in the backend `.env` or Render Environment settings.
+Optionally set `ANTHROPIC_MODEL` (default: `claude-haiku-4-5-20251001`), then restart
+or redeploy the backend. No additional dependency is needed.
+
+Claude is the final backup after configured Gemini, OpenRouter free, xAI, and OpenAI providers
+reach their rate limits. Missing providers are skipped; non-quota errors remain
+visible. With all other keys unset, Claude can work alone. Structured requests
+use a forced result tool and the existing Pydantic validation; no external tool
+is executed. Truncated answers are reported as errors rather than used as results.
+
+Enabling this backup sends document/evidence text to Anthropic and may incur API
+charges. Keep `ANTHROPIC_API_KEY` out of frontend variables, browser code, and Git.
+An Anthropic API account with available quota is required; a Claude subscription
+does not provide API credits. This does not change the Supabase sign-in setup.
+
+## OpenRouter free backup
+
+Set `OPENROUTER_API_KEY` in the backend `.env` or Render Environment settings
+(create a key at https://openrouter.ai/settings/keys), then restart or redeploy.
+`OPENROUTER_MODEL` defaults to `openrouter/free`, which routes to available free
+models. You may select a specific model ID ending in `:free`; other model IDs
+are rejected before a request is sent. No additional dependency is required.
+
+The backend loads only the repository-root `.env`, regardless of the directory
+from which it is started; existing environment variables take precedence.
+`frontend/.env.local` does not configure the backend. Never place provider keys
+in that frontend file. Local `.env` files are not uploaded to Render: configure
+the deployed backend's variables directly in Render and redeploy the latest code.
+
+OpenRouter runs after Gemini and before the paid backups. To use only free
+providers, leave `XAI_API_KEY`, `OPENAI_API_KEY`, and `ANTHROPIC_API_KEY` unset.
+To use OpenRouter alone, also unset both `GEMINI_API_KEY` and `GEMINI_API_KEYS`.
+Rate limits allow the next configured provider to run; other errors stay visible.
+JSON requests require provider support for JSON mode and are validated using
+the same Pydantic schemas. Incomplete or blocked results are rejected.
+
+Free does not mean unlimited: availability and daily/minute limits vary.
+Check current limits at https://openrouter.ai/docs/api/reference/limits.
+Enabling the provider sends document/evidence text to OpenRouter and its selected
+upstream provider; review their data policies and use synthetic documents.
+Keep `OPENROUTER_API_KEY` out of Vercel frontend variables, browser code, and Git.
+
 ## Test
 
 ```bash
