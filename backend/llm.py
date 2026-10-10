@@ -6,8 +6,11 @@ Privacy: never log or print prompts, responses or the API key.
 
 import json
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
+from time import monotonic
 from typing import TypeVar
 
 import httpx
@@ -22,6 +25,8 @@ DEFAULT_MODEL = "gemini-3.7-flash"
 DEFAULT_FALLBACK_MODELS = "gemini-3.7-flash-lite"
 DEFAULT_TIMEOUT_SECONDS = 60
 TEMPERATURE = 0
+ANALYSIS_TIMEOUT_SECONDS = 90
+_analysis_deadline: ContextVar[float | None] = ContextVar("analysis_deadline", default=None)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -36,6 +41,36 @@ class LLMOutputError(LLMError):
 
 class LLMRateLimitError(LLMError):
     """The provider rejected a request because a rate or usage limit was reached."""
+
+
+class LLMTimeoutError(LLMError):
+    """The shared analysis budget has expired."""
+
+
+def check_analysis_deadline() -> None:
+    deadline = _analysis_deadline.get()
+    if deadline is not None and monotonic() >= deadline:
+        raise LLMTimeoutError(
+            "Analysis exceeded its 90-second time budget. No completed report was produced. "
+            "Try a shorter document or a specific faster free model."
+        )
+
+
+@contextmanager
+def analysis_time_budget():
+    token = _analysis_deadline.set(monotonic() + ANALYSIS_TIMEOUT_SECONDS)
+    try:
+        yield
+        check_analysis_deadline()
+    finally:
+        _analysis_deadline.reset(token)
+
+
+def _request_timeout() -> float:
+    check_analysis_deadline()
+    timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
+    deadline = _analysis_deadline.get()
+    return min(timeout, max(0.001, deadline - monotonic())) if deadline is not None else timeout
 
 
 def _api_keys() -> list[str]:
@@ -55,8 +90,10 @@ def _api_keys() -> list[str]:
 
 @lru_cache(maxsize=None)
 def _client_for(api_key: str) -> genai.Client:
-    timeout_ms = int(os.getenv("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)) * 1000
-    return genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=timeout_ms))
+    timeout_ms = int(_request_timeout() * 1000)
+    return genai.Client(api_key=api_key, http_options=types.HttpOptions(
+        timeout=timeout_ms, retry_options=types.HttpRetryOptions(attempts=1)
+    ))
 
 
 # Index of the key to try first; moves forward when a key hits its limit so later calls skip it.
@@ -90,7 +127,14 @@ def _generate_content(prompt: str, **config):
                 response = _client_for(keys[index]).models.generate_content(
                     model=model,
                     contents=prompt,
-                    config=types.GenerateContentConfig(temperature=TEMPERATURE, **config),
+                    config=types.GenerateContentConfig(
+                        temperature=TEMPERATURE,
+                        http_options=types.HttpOptions(
+                            timeout=max(1, int(_request_timeout() * 1000)),
+                            retry_options=types.HttpRetryOptions(attempts=1),
+                        ),
+                        **config,
+                    ),
                 )
             except errors.APIError as e:
                 if e.code in (401, 403, 429):
@@ -191,7 +235,7 @@ def _generate_chat(
     body["messages"] = [{"role": "user", "content": content}]
     if provider == "OpenRouter":
         body["provider"] = {"require_parameters": True}
-    timeout = int(os.getenv("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
+    timeout = _request_timeout()
     try:
         response = httpx.post(
             url, json=body, timeout=timeout, headers={"Authorization": "Bearer " + api_key}
@@ -239,7 +283,7 @@ def _generate_anthropic(prompt: str, **config) -> str:
     try:
         response = httpx.post(
             ANTHROPIC_URL, json=body,
-            timeout=int(os.getenv("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)),
+            timeout=_request_timeout(),
             headers={
                 "x-api-key": os.getenv("ANTHROPIC_API_KEY", "").strip(),
                 "anthropic-version": "2023-06-01",
@@ -284,6 +328,7 @@ def _generate_anthropic(prompt: str, **config) -> str:
 
 def _generate(prompt: str, **config) -> str:
     """Gemini, then configured backups; advance only for missing keys or rate limits."""
+    check_analysis_deadline()
     backups = [
         generate for key, generate in [
             ("OPENROUTER_API_KEY", _generate_openrouter),
@@ -308,6 +353,7 @@ def _generate(prompt: str, **config) -> str:
         if _gemini_configured() or not backups:
             raise
     for index, generate in enumerate(backups):
+        check_analysis_deadline()
         try:
             return generate(prompt, **config)
         except LLMRateLimitError:
@@ -324,12 +370,15 @@ def _gemini_configured() -> bool:
 
 def ask_llm(prompt: str) -> str:
     """Send a prompt, get plain text back."""
-    return _generate(prompt)
+    text = _generate(prompt)
+    check_analysis_deadline()
+    return text
 
 
 def ask_llm_json(prompt: str, schema: type[T]) -> T:
     """Send a prompt, get back a validated instance of the Pydantic class `schema`."""
     text = _generate(prompt, response_mime_type="application/json", response_schema=schema)
+    check_analysis_deadline()
     try:
         return schema.model_validate_json(text)
     except ValidationError:

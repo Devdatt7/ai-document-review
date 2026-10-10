@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from claims import extract_claims
 from ingest import load_text_source
-from llm import LLMError
+from llm import LLMError, LLMTimeoutError, analysis_time_budget
 from models import (SOURCE_ID_PATTERN, Claim, ClaimExtractionResult, EvidenceChunk, EvidenceResult,
                     PipelineResult, RiskAnalysisResult, VerificationResult)
 from pipeline import review_document
@@ -100,6 +100,9 @@ class AnalyzeRequest(BaseModel):
 def analyze(request: AnalyzeRequest):
     """Main entry point: the whole review pipeline. Nothing is stored or logged."""
     try:
-        return review_document(request.document_text, request.source_text, request.source_id)
+        with analysis_time_budget():
+            return review_document(request.document_text, request.source_text, request.source_id)
+    except LLMTimeoutError as error:
+        raise HTTPException(status_code=504, detail=str(error)) from None
     except LLMError as error:
         raise HTTPException(status_code=502, detail=str(error))

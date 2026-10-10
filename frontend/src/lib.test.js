@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { ANALYSIS_TIMEOUT_MS, API_URL, analyzeDocument } from "./api.js";
 import {
   assessmentAfterInputChange,
   buildFindingViews,
@@ -45,6 +46,52 @@ const result = {
       priority_score: 60, reason: "r", matched_text: null, masked_text: null, recommended_action: "Fix" },
   ],
 };
+
+test("analysis sends the request and clears its timeout on success", async (t) => {
+  let cleared = false;
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    assert.equal(delay, 120_000);
+    assert.equal(delay, ANALYSIS_TIMEOUT_MS);
+    return 42;
+  });
+  t.mock.method(globalThis, "clearTimeout", (timer) => {
+    assert.equal(timer, 42);
+    cleared = true;
+  });
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    assert.equal(url, `${API_URL}/analyze`);
+    assert.equal(options.signal.aborted, false);
+    assert.deepEqual(JSON.parse(options.body), { document_text: "doc", source_text: "source" });
+    return { ok: true, json: async () => ({ status: "REVIEW" }) };
+  });
+  assert.deepEqual(await analyzeDocument("doc", "source"), { status: "REVIEW" });
+  assert.equal(cleared, true);
+});
+
+for (const phase of ["connection", "body"]) {
+  test(`analysis aborts a stalled ${phase} and reports timeout`, async (t) => {
+    let expire;
+    let cleared = false;
+    t.mock.method(globalThis, "setTimeout", (callback) => { expire = callback; return 42; });
+    t.mock.method(globalThis, "clearTimeout", () => { cleared = true; });
+    t.mock.method(globalThis, "fetch", (url, { signal }) => {
+      const stalled = () => new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        expire();
+      });
+      return phase === "connection" ? stalled() : Promise.resolve({ ok: true, json: stalled });
+    });
+    await assert.rejects(analyzeDocument("doc", "source"), /timed out after 2 minutes/);
+    assert.equal(cleared, true);
+  });
+}
+
+test("analysis preserves backend errors and clears the timer", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => ({
+    ok: false, status: 504, json: async () => ({ detail: "Analysis exceeded its time budget." }),
+  }));
+  await assert.rejects(analyzeDocument("doc", "source"), /time budget/);
+});
 
 test("keeps backend ranked order and links claim, sentence and evidence", () => {
   const views = buildFindingViews(result);

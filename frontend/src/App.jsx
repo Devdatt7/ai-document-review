@@ -776,7 +776,7 @@ export default function App({ user = null, onSignOut = null }) {
               {loading ? <><span className="spinner" aria-hidden="true" /> Analyzing…</> : "Analyze document"}
             </button>
             <span className="live-analysis-note">Live analysis uses the AI service. It does not fall back to a sample report.</span>
-            {loading && <span role="status" className="muted">Checking claims against the source. This can take a few seconds…</span>}
+            {loading && <span role="status" className="muted">Extracting and checking claims. Free AI providers can be slow; this request stops waiting after 2 minutes.</span>}
           </div>
         </section>
       )}

@@ -593,6 +593,76 @@ def test_openrouter_network_errors(monkeypatch, error):
         llm._generate_openrouter("hi")
 
 
+def test_analysis_budget_limits_request_timeout_and_resets(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(llm, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "60")
+    with llm.analysis_time_budget():
+        assert llm._request_timeout() == 60
+        clock[0] += 80
+        assert llm._request_timeout() == 10
+        clock[0] += 10
+        with pytest.raises(llm.LLMTimeoutError, match="90-second"):
+            llm._request_timeout()
+        clock[0] = 180
+    assert llm._analysis_deadline.get() is None
+    assert llm._request_timeout() == 60
+
+
+def test_expired_budget_does_not_call_another_provider(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(llm, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    def limited(prompt, **config):
+        clock[0] = 90
+        raise llm.LLMRateLimitError("quota")
+
+    def unexpected(prompt, **config):
+        pytest.fail("Expired analysis must not call a backup")
+
+    monkeypatch.setattr(llm, "_generate_gemini", limited)
+    monkeypatch.setattr(llm, "_generate_openrouter", unexpected)
+    with pytest.raises(llm.LLMTimeoutError):
+        with llm.analysis_time_budget():
+            llm.ask_llm("hi")
+    assert llm._analysis_deadline.get() is None
+
+
+def test_slow_answer_is_not_returned_as_completed_report(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(llm, "monotonic", lambda: clock[0])
+
+    def slow(prompt, **config):
+        clock[0] = 91
+        return "late answer"
+
+    monkeypatch.setattr(llm, "_generate", slow)
+    with pytest.raises(llm.LLMTimeoutError):
+        with llm.analysis_time_budget():
+            llm.ask_llm("hi")
+
+
+def test_gemini_request_has_remaining_timeout_and_no_sdk_retry(monkeypatch):
+    calls = []
+
+    class Models:
+        def generate_content(self, **kwargs):
+            options = kwargs["config"].http_options
+            calls.append((options.timeout, options.retry_options.attempts))
+            return type("R", (), {"text": "ok"})()
+
+    clock = [0.0]
+    monkeypatch.setattr(llm, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setattr(llm, "_client_for", lambda key: type("C", (), {"models": Models()})())
+    with llm.analysis_time_budget():
+        clock[0] = 85
+        assert llm.ask_llm("hi") == "ok"
+    assert calls == [(5000, 1)]
+
+
 # Live test: calls the real Gemini API only after explicit opt-in.
 # Prompts must be synthetic only (free tier).
 @pytest.mark.skipif(

@@ -10,7 +10,8 @@ import re
 
 from pydantic import BaseModel, Field
 
-from llm import LLMError, LLMOutputError, LLMRateLimitError, ask_llm_json
+from llm import (LLMError, LLMOutputError, LLMRateLimitError, LLMTimeoutError,
+                 ask_llm_json, check_analysis_deadline)
 from models import Claim, EvidenceChunk, EvidenceResult, VerificationResult, VerificationVerdict
 from retrieval import tokenize
 
@@ -265,11 +266,12 @@ def verify_claims(
             eligible.append((claim, chunks))
 
     for start in range(0, len(eligible), batch_size):
+        check_analysis_deadline()
         batch = eligible[start:start + batch_size]
         expected_ids = {claim.claim_id for claim, _ in batch}
         try:
             response = _ask_gemini_batch(build_batch_prompt(batch))
-        except LLMRateLimitError:
+        except (LLMRateLimitError, LLMTimeoutError):
             raise
         except LLMError as error:
             for claim, _ in batch:
@@ -316,7 +318,7 @@ def verify_claim(claim: Claim, evidence_chunks: list[EvidenceChunk]) -> Verifica
     # 3. Everything else: ask Gemini, then validate its answer.
     try:
         answer = _ask_gemini(build_prompt(claim, evidence_chunks))
-    except LLMRateLimitError:
+    except (LLMRateLimitError, LLMTimeoutError):
         raise
     except LLMError as error:
         return _unclear(claim, f"The claim could not be checked automatically: {error}")

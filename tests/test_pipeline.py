@@ -19,6 +19,40 @@ ROOT = Path(__file__).resolve().parent.parent
 client = TestClient(app)
 
 
+def test_analysis_deadline_returns_504_not_partial_success(monkeypatch):
+    import llm
+    import main
+
+    def expired(*args):
+        assert llm._analysis_deadline.get() is not None
+        raise llm.LLMTimeoutError("Analysis exceeded its time budget.")
+
+    monkeypatch.setattr(main, "review_document", expired)
+    response = client.post("/analyze", json={"document_text": "test", "source_text": "test"})
+    assert response.status_code == 504
+    assert "time budget" in response.json()["detail"]
+    assert llm._analysis_deadline.get() is None
+
+
+def test_verification_does_not_hide_analysis_deadline(monkeypatch):
+    import llm
+    from models import Claim
+
+    claim = Claim(claim_id="C1", sentence_id="S1", claim_text="The shop is open.", claim_type="general")
+    chunks = [EvidenceChunk(source_id="SRC1", page=1, chunk_id="SRC1-P1-C1",
+                            text="The shop is open.", score=1.0)]
+
+    def expired(*args):
+        raise llm.LLMTimeoutError("Analysis expired.")
+
+    monkeypatch.setattr(verify, "_ask_gemini", expired)
+    monkeypatch.setattr(verify, "_ask_gemini_batch", expired)
+    with pytest.raises(llm.LLMTimeoutError):
+        verify.verify_claim(claim, chunks)
+    with pytest.raises(llm.LLMTimeoutError):
+        verify.verify_claims([claim], [EvidenceResult(claim_id="C1", evidence_chunks=chunks)])
+
+
 def finding(level, finding_id="F1"):
     return RiskFinding(finding_id=finding_id, consequence=level, priority_score=50, reason="r",
                        recommended_action="a")
